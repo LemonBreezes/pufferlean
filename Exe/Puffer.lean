@@ -30,6 +30,7 @@ import Puffer.Float.BLAS
 import Puffer.Float.CUDA
 import Puffer.RL.FFITrain
 import Puffer.RL.MinGRUTrain
+import Puffer.RL.Wandb
 import Puffer.Plugin
 import Puffer.Check.Core
 import Puffer.Check.Parse
@@ -306,6 +307,12 @@ structure Config where
   -- Every `checkpointInterval` updates (and always the final update) the resident policy weights are
   -- written to `checkpoints/<env>/<seed>/<step>.bin`; `--load <path>` (or `puffer eval`) reads them back.
   checkpointInterval : Nat := 0
+  -- wandb live tracking (PufferLib `pufferl.py`: `--wandb` / `--wandb-project` / `--wandb-group` / `--tag`).
+  -- `--wandb` spawns `tools/puffer_track.py --daemon` and streams it the dashboard dict each tick.
+  wandb : Bool := false
+  wandbProject : String := "puffer4"   -- PufferLib default wandb project
+  wandbGroup : String := "debug"       -- PufferLib default wandb group
+  wandbTag : Option String := none     -- --tag: single run tag (else no tags)
 
 /-- Strip a leading `--`; PufferLib also accepts the `train.`/`policy.` namespace,
     which we ignore (flatten to the leaf key). Underscores and hyphens both work. -/
@@ -477,7 +484,11 @@ def configOf (env : String) (m : FlagMap) : Config :=
     network := (g "network").getD d.network                       -- [torch] network (MinGRU/GRU/LSTM/MLP)
     numLayers := (g "num-layers").elim d.numLayers (parseNat · d.numLayers)
     loadPath := g "load"
-    checkpointInterval := (g "checkpoint-interval").elim d.checkpointInterval (parseNat · d.checkpointInterval) }
+    checkpointInterval := (g "checkpoint-interval").elim d.checkpointInterval (parseNat · d.checkpointInterval)
+    wandb := (g "wandb").elim d.wandb (parseBool · d.wandb)   -- store_true (`--wandb`) or ini 1/0
+    wandbProject := (g "wandb-project").getD d.wandbProject
+    wandbGroup := (g "wandb-group").getD d.wandbGroup
+    wandbTag := g "tag" }
 
 /-! ### Config-file parity (`config/default.ini` + per-env overrides).
 
@@ -556,7 +567,9 @@ def knownFlagKeys : List String :=
     -- vec.*
     "num-envs", "total-agents", "num-threads", "num-buffers", "buffers",
     -- run control (parsed by configOf; some are inert but accepted)
-    "load", "log", "config" ]
+    "load", "log", "config",
+    -- wandb tracking (PufferLib argparse: --wandb / --wandb-project / --wandb-group / --tag)
+    "wandb", "wandb-project", "wandb-group", "tag" ]
 
 /-- First unrecognized CLI flag key (raw, e.g. `total_timesteps` or `foo.bar.baz`), or `none` if all are
     accepted. Namespaced keys (`a.b`) are accepted for section `env` (passthrough) or any known leaf;
@@ -573,6 +586,24 @@ def firstUnknownFlag (args : List String) : Option String := Id.run do
         | _            => knownFlagKeys.contains (normKey rawKey)
       if !ok && !rawKey.isEmpty then return some rawKey
   return none
+
+/-- This run's final checkpoint: the most-recently-WRITTEN `<step>.bin` under `checkpoints/<env>/<seed>/`.
+    Checkpoints accumulate across runs sharing a seed (the dir is keyed by seed, not a unique run-id), so
+    the highest STEP can belong to an older run — newest-by-mtime is the one THIS run just wrote. GPU runs
+    are sequential, so there is no concurrent writer. `none` if the trainer wrote no checkpoint. Used only
+    to upload this run's model as a wandb Artifact (`--wandb`). -/
+def runFinalCheckpoint (env : String) (seed : UInt64) : IO (Option String) := do
+  let dir : System.FilePath := s!"checkpoints/{env}/{seed}"
+  if !(← System.FilePath.pathExists dir) then return none
+  let mut best : Option (Int × String) := none
+  for f in (← dir.readDir) do
+    if f.fileName.endsWith ".bin" then
+      let mt := (← f.path.metadata).modified
+      let key : Int := mt.sec * 1000000000 + Int.ofNat mt.nsec.toNat   -- nanosecond mtime
+      match best with
+      | some (bk, _) => if key ≥ bk then best := some (key, f.path.toString)
+      | none         => best := some (key, f.path.toString)
+  return best.map (·.2)
 
 /-- Left-pad a string to width `w` with spaces (for aligned columns). -/
 def padL (s : String) (w : Nat) : String :=
@@ -628,6 +659,10 @@ def usage : String :=
   "  --train.checkpoint-interval N  save the policy every N updates (default 0 = final only)\n" ++
   "  --load <path>                 seed initial weights (train) / policy to score (eval) from a checkpoint\n" ++
   "  --train.seed N                RNG seed (default 42)\n" ++
+  "  --wandb                       log this run to Weights & Biases live (needs `pip install wandb` +\n" ++
+  "                                 `wandb login`; streams via tools/puffer_track.py). PufferLib's --wandb.\n" ++
+  "  --wandb-project P             wandb project (default puffer4)   --wandb-group G   wandb group (default debug)\n" ++
+  "  --tag T                       single wandb run tag\n" ++
   "  (PufferLib's live training dashboard renders by default for MinGRU envs, as in PufferLib;\n" ++
   "   set PUFFER_PLAIN_LOG=1 for machine-parseable per-update lines instead.)\n\n" ++
   "DEV MODES  GPU/FFI kernel checks against the Lean f64 oracle + benchmarks:\n" ++
@@ -2202,6 +2237,13 @@ def main (args : List String) : IO Unit := do
         -- hatch (env var, so the commandline surface still matches PufferLib) that our verification
         -- tooling (tools/env_sweep.sh, tools/compare.py) sets to get the machine-parseable lines.
         let plainLog := (← IO.getEnv "PUFFER_PLAIN_LOG").isSome
+        -- wandb (PufferLib `--wandb`): spawn the live tracker daemon BEFORE training so the shared
+        -- dashboard `redraw` streams it the same metric dict each 0.6s tick. `config=` the resolved
+        -- flag map, as PufferLib passes `config=args` to `wandb.init`.
+        if cfg.wandb then
+          let cfgJson := "{" ++ String.intercalate "," (flags.map (fun kv =>
+            "\"" ++ Puffer.RL.Wandb.escJson kv.1 ++ "\":\"" ++ Puffer.RL.Wandb.escJson kv.2 ++ "\"")) ++ "}"
+          Puffer.RL.Wandb.start cfg.wandbProject cfg.wandbGroup cfg.wandbTag cfgJson
         -- trainer derives updates from total_timesteps / (batch·horizon) once it knows num_agents.
         if isRecurrent && !isCont && nHeads > 1 && !isLSTM then
           trainPluginEnvMinGRUMD env envCfg
@@ -2262,6 +2304,10 @@ def main (args : List String) : IO Unit := do
             (entCoef := cfg.entCoef) (clipEps := cfg.clipCoef)
             (vfClip := cfg.vfClipCoef) (maxGradNorm := cfg.maxGradNorm)
             (bf16 := 1) (minLrRatio := effMinLr) (logDash := !plainLog) (seed := cfg.seed)
+        -- wandb: upload this run's final checkpoint as Artifact(run_id, type='model') and close the run
+        -- (PufferLib's end-of-_train behavior). No checkpoint written ⇒ nothing to upload, just finish.
+        if cfg.wandb then
+          Puffer.RL.Wandb.finish (← runFinalCheckpoint env cfg.seed)
   | "verify-mingru-grad" :: _ =>
       let (a, r) := Puffer.RL.NNTrain.mingruGradCheck
       IO.println s!"mingru-grad AD-vs-finite-diff:  max|Δ| = {a}   max relΔ = {r}"
