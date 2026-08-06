@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `convert` -> puffer-lean plugin ABI.
+/* Adapter: PufferLib Ocean `convert` -> pufferlean plugin ABI.
  * MULTI-DISCRETE: 2 heads {9,5}. float obs (28 per agent when num_resources=8),
  * DOUBLE actions (Convert.actions is double*), float rewards/terminals.
  * Multi-agent: struct has int num_agents. init() mallocs agents/factories. */

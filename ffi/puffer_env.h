@@ -1,4 +1,4 @@
-/* puffer_env.h — the standard C env ABI for puffer-lean plugin envs.
+/* puffer_env.h — the standard C env ABI for pufferlean plugin envs.
  *
  * Each env lives in its own folder (envs/<name>/) and compiles to a standalone shared
  * library libenv_<name>.so that exports these six symbols. `puffer` NEVER sees any env at

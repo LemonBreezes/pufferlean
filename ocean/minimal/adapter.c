@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `minimal` -> puffer-lean plugin ABI.
+/* Adapter: PufferLib Ocean `minimal` -> pufferlean plugin ABI.
  * Multi-agent coordination env (AGENTS puffers catching TARGETS of matching type).
  * MULTI-DISCRETE: 2 heads {9,5} (actions[2*i] heading adjust 0-8, actions[2*i+1]
  * speed adjust 0-4). float obs/actions/rewards/terminals.

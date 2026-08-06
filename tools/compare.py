@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""compare.py — one command to compare pufferlib-lean against actual PufferLib.
+"""compare.py — one command to compare pufferlean against actual PufferLib.
 
-Checks the OUTPUT (numerics), CONVERGENCE, and PERFORMANCE of the kernels / math pufferlib-lean
+Checks the OUTPUT (numerics), CONVERGENCE, and PERFORMANCE of the kernels / math pufferlean
 runs, against the real PufferLib library. Point --pufferlib at a PufferLib checkout that has a
 .venv with a compiled `_C` (auto-detects ~/src/PufferLib).
 
@@ -283,7 +283,7 @@ def main():
     args = ap.parse_args()
 
     t0 = time.time()
-    print(f"{B}pufferlib-lean ⟷ PufferLib — parity + performance{X}")
+    print(f"{B}pufferlean ⟷ PufferLib — parity + performance{X}")
     if not os.path.exists(PUFFER_BIN) and not ensure_lean_binary():
         print(color("could not build the Lean CLI — aborting", R)); return 2
 

@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `squared_continuous` → puffer-lean plugin ABI. CONTINUOUS: 2 diagonal-Gaussian
+/* Adapter: PufferLib Ocean `squared_continuous` → pufferlean plugin ABI. CONTINUOUS: 2 diagonal-Gaussian
  * action dims (ACT_SIZES {1,1}); runs the REAL ocean/squared_continuous c_reset/c_step (uint8 grid obs). */
 #include "squared_continuous.h"
 #include <string.h>

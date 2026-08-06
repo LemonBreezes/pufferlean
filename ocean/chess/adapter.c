@@ -15,7 +15,7 @@
    that would still train poorly because its observations are categorical tokens upstream feeds through
    an embedding we also do not have. If nethack is ever ported, or an embedding encoder lands, revisit —
    the two changes together are what make chess trainable, and neither is useful alone. */
-/* Adapter: PufferLib Ocean `chess` -> puffer-lean plugin ABI. Runs the REAL ocean/chess/chess.h
+/* Adapter: PufferLib Ocean `chess` -> pufferlean plugin ABI. Runs the REAL ocean/chess/chess.h
  * c_reset/c_step (full legal-move chess: magic bitboards, castling, en passant, promotion,
  * 50-move rule, threefold repetition).
  *

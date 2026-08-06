@@ -1,4 +1,4 @@
-/* ocean_adapter.h — bridge a real PufferLib Ocean C env to puffer-lean's plugin ABI (puffer_env.h).
+/* ocean_adapter.h — bridge a real PufferLib Ocean C env to pufferlean's plugin ABI (puffer_env.h).
  *
  * Each env's adapter.c does (mirroring PufferLib's binding.c):
  *     #include "<env>.h"                     // the real ocean env (c_reset/c_step + the struct)

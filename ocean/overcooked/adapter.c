@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean overcooked -> puffer-lean plugin ABI. Runs the REAL ocean/overcooked/overcooked.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean overcooked -> pufferlean plugin ABI. Runs the REAL ocean/overcooked/overcooked.h c_reset/c_step. */
 #include "overcooked.h"
 #include <string.h>
 #include <stdint.h>

@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `drone` → puffer-lean plugin ABI. MULTI-AGENT + CONTINUOUS: num_drones agents
+/* Adapter: PufferLib Ocean `drone` → pufferlean plugin ABI. MULTI-AGENT + CONTINUOUS: num_drones agents
  * per instance, 4 diagonal-Gaussian action dims (ACT_SIZES {1,1,1,1}), FloatTensor obs (DRONE_OBS_SIZE).
  * Replicates binding.c my_init (config → rng task pick → hover/race config → task_init → init) without the
  * Python Dict layer, then drives the REAL drone c_reset/c_step (physics + task reward, auto-reset on done). */

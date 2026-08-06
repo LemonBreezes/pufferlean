@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean snake -> puffer-lean plugin ABI. Runs the REAL ocean/snake/snake.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean snake -> pufferlean plugin ABI. Runs the REAL ocean/snake/snake.h c_reset/c_step. */
 #include "snake.h"
 #include <string.h>
 #include <stdint.h>

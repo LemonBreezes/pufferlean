@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean trash_pickup -> puffer-lean plugin ABI. Runs the REAL ocean/trash_pickup/trash_pickup.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean trash_pickup -> pufferlean plugin ABI. Runs the REAL ocean/trash_pickup/trash_pickup.h c_reset/c_step. */
 #include "trash_pickup.h"
 #include <string.h>
 #include <stdint.h>

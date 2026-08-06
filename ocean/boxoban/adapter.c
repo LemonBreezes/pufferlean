@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `boxoban` -> puffer-lean plugin ABI. Runs the REAL ocean/boxoban/boxoban.h
+/* Adapter: PufferLib Ocean `boxoban` -> pufferlean plugin ABI. Runs the REAL ocean/boxoban/boxoban.h
  * c_reset/c_step (10x10 Sokoban, 4 uint8 obs planes AGENT/WALLS/BOXES/TARGET = 400 bytes,
  * 5 discrete actions NOOP/DOWN/UP/LEFT/RIGHT).
  *

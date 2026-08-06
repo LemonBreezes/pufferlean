@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean drmario -> puffer-lean plugin ABI. Runs the REAL ocean/drmario/drmario.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean drmario -> pufferlean plugin ABI. Runs the REAL ocean/drmario/drmario.h c_reset/c_step. */
 #include "drmario.h"
 #include <string.h>
 #include <stdint.h>

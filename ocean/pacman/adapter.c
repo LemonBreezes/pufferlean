@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `pacman` -> puffer-lean plugin ABI. Runs the REAL ocean/pacman/pacman.h
+/* Adapter: PufferLib Ocean `pacman` -> pufferlean plugin ABI. Runs the REAL ocean/pacman/pacman.h
  * c_reset/c_step (28x31 maze, 4 ghosts with the original scatter/chase/frightened AI).
  * float obs (291 = 11 player + 9*4 ghost + 240 dots + 4 powerups), 4 discrete actions
  * (0=DOWN 1=UP 2=RIGHT 3=LEFT), float actions/rewards/terminals.

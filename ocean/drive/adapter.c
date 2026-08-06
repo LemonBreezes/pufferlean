@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `drive` -> puffer-lean plugin ABI. Runs the REAL ocean/drive/drive.h
+/* Adapter: PufferLib Ocean `drive` -> pufferlean plugin ABI. Runs the REAL ocean/drive/drive.h
  * c_reset/c_step (Waymo-derived driving, float obs, MULTI-DISCRETE {7,13} actions).
  *
  * drive is multi-agent: the number of controlled agents (active_agent_count) is determined by the

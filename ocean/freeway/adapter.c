@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean freeway -> puffer-lean plugin ABI. Runs the REAL ocean/freeway/freeway.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean freeway -> pufferlean plugin ABI. Runs the REAL ocean/freeway/freeway.h c_reset/c_step. */
 #include "freeway.h"
 #include <string.h>
 #include <stdint.h>

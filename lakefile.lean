@@ -2,7 +2,7 @@ import Lake
 open Lake DSL System
 
 /-!
-# Lake build configuration for puffer-lean
+# Lake build configuration for pufferlean
 
 Migrated from `lakefile.toml` to `lakefile.lean` so the native FFI kernels
 (`ffi/pufferffi.c`) can be compiled and linked by Lake itself via a custom
@@ -12,7 +12,7 @@ is now self-contained: Lake compiles the C oracle-kernels and links them into th
 trainer exe. The `trace_*` difftest binaries do not depend on the FFI object.
 -/
 
-package «puffer-lean»
+package «pufferlean»
 
 -- Build-portability splices: each resolves an absolute path when the lakefile ELABORATES (reading env
 -- with a fallback = this dev box), so both the IO compile targets and the pure `moreLinkArgs` can use

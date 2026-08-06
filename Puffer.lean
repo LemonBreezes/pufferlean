@@ -1,4 +1,4 @@
--- PufferLib-Lean: a real-number reference model of PufferLib's RL trainer and
+-- Pufferlean: a real-number reference model of PufferLib's RL trainer and
 -- ocean environments, with bounded floating-point (bf16) approximation and
 -- differential testing against the C implementation at ~/src/PufferLib.
 --

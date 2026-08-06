@@ -1,4 +1,4 @@
-#+title: Pufferlib Lean
+#+title: Pufferlean
 
 This is a Lean 4 port of Pufferlib 4.0.0. This port uses FFI to match or
 slightly exceed pufferlib's performance. This port is CUDA only. The purpose of

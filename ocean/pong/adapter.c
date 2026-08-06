@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean pong -> puffer-lean plugin ABI. Runs the REAL ocean/pong/pong.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean pong -> pufferlean plugin ABI. Runs the REAL ocean/pong/pong.h c_reset/c_step. */
 #include "pong.h"
 #include <string.h>
 #include <stdint.h>

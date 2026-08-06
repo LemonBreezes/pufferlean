@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `robocode` → puffer-lean plugin ABI. MULTI-AGENT + MULTI-DISCRETE:
+/* Adapter: PufferLib Ocean `robocode` → pufferlean plugin ABI. MULTI-AGENT + MULTI-DISCRETE:
  * num_agents robots per battle, 5 action heads (ACT_SIZES {4,9,11,11,6}), FloatTensor 16-dim obs.
  * Replicates binding.c my_init (config → init) then drives the REAL robocode c_reset/c_step
  * (all agents share one episode; end_episode resets the whole battle + sets every terminal). */

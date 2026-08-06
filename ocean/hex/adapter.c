@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean hex -> puffer-lean plugin ABI. Runs the REAL ocean/hex/hex.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean hex -> pufferlean plugin ABI. Runs the REAL ocean/hex/hex.h c_reset/c_step. */
 #include "hex.h"
 #include <string.h>
 #include <stdint.h>

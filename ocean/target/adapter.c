@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `target` -> puffer-lean plugin ABI.
+/* Adapter: PufferLib Ocean `target` -> pufferlean plugin ABI.
  * Multi-agent env (puffers chasing stars). MULTI-DISCRETE: 2 heads {9,5}
  * (heading adjust 0-8, speed adjust 0-4). float obs/actions/rewards/terminals.
  * init() mallocs internal agents[num_agents] + goals[num_goals]; the 4 caller

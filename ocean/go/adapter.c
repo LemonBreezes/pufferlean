@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean go -> puffer-lean plugin ABI. Runs the REAL ocean/go/go.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean go -> pufferlean plugin ABI. Runs the REAL ocean/go/go.h c_reset/c_step. */
 #include "go.h"
 #include <string.h>
 #include <stdint.h>

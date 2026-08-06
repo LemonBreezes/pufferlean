@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean whisker_racer -> puffer-lean plugin ABI. Runs the REAL ocean/whisker_racer/whisker_racer.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean whisker_racer -> pufferlean plugin ABI. Runs the REAL ocean/whisker_racer/whisker_racer.h c_reset/c_step. */
 #include "whisker_racer.h"
 #include <string.h>
 #include <stdint.h>

@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean dino -> puffer-lean plugin ABI. Runs the REAL ocean/dino/dino.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean dino -> pufferlean plugin ABI. Runs the REAL ocean/dino/dino.h c_reset/c_step. */
 #include "dino.h"
 #include <string.h>
 #include <stdint.h>

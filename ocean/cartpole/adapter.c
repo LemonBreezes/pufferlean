@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean cartpole -> puffer-lean plugin ABI. Runs the REAL ocean/cartpole/cartpole.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean cartpole -> pufferlean plugin ABI. Runs the REAL ocean/cartpole/cartpole.h c_reset/c_step. */
 #include "cartpole.h"
 #include <string.h>
 #include <stdint.h>

@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean lightsout -> puffer-lean plugin ABI. Runs the REAL ocean/lightsout/lightsout.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean lightsout -> pufferlean plugin ABI. Runs the REAL ocean/lightsout/lightsout.h c_reset/c_step. */
 #include "lightsout.h"
 #include <string.h>
 #include <stdint.h>

@@ -15,7 +15,7 @@
     #define GLSL_VERSION 100
 #endif
 
-/* puffer-lean determinism hooks. Both keep upstream's exact behaviour unless the embedder overrides
+/* pufferlean determinism hooks. Both keep upstream's exact behaviour unless the embedder overrides
  * them, so an unmodified build of this header is unchanged.
  *
  * MOBA_BFS_ENSURE: `ai_paths` (256 MB) is SHARED by every env copy — legitimate, because bfs()
@@ -33,7 +33,7 @@
  *   upstream's (fill on a miss, unsynchronised, single-threaded-only). An embedder that steps envs
  *   concurrently may replace it with a publish protocol: fill each block exactly once under a lock,
  *   publish it with a release store, and never read a block before its acquire-load says published.
- *   puffer-lean's override is itself gated OFF by default (PUFFER_MOBA_DETERMINISTIC), because the
+ *   pufferlean's override is itself gated OFF by default (PUFFER_MOBA_DETERMINISTIC), because the
  *   racy behaviour is what PufferLib's own threaded moba does and is therefore the baseline.
  *
  * rand(): the embedder may #define rand() to a PER-ENV generator before including this header. The
@@ -410,7 +410,7 @@ struct MOBA {
 
     CachedRNG *rng;
 
-    /* puffer-lean: per-env state for an embedder-supplied rand() (see the hook comment at the top of
+    /* pufferlean: per-env state for an embedder-supplied rand() (see the hook comment at the top of
        this header). Unused when rand() is the libc one. */
     unsigned long long rand_state;
 };

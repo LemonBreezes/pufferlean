@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean connect4 -> puffer-lean plugin ABI. Runs the REAL ocean/connect4/connect4.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean connect4 -> pufferlean plugin ABI. Runs the REAL ocean/connect4/connect4.h c_reset/c_step. */
 #include "connect4.h"
 #include <string.h>
 #include <stdint.h>

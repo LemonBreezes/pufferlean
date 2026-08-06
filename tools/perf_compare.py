@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""perf_compare.py — time PufferLib's real kernels/ops so pufferlib-lean's device kernels can be
+"""perf_compare.py — time PufferLib's real kernels/ops so pufferlean's device kernels can be
 compared head-to-head at matched shapes. Runs INSIDE PufferLib's venv (needs torch + pufferlib + _C).
 
     cd ~/src/PufferLib && unset LD_LIBRARY_PATH && .venv/bin/python <lean>/tools/perf_compare.py

@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean craftax_classic -> puffer-lean plugin ABI. Runs the REAL ocean/craftax_classic/craftax_classic.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean craftax_classic -> pufferlean plugin ABI. Runs the REAL ocean/craftax_classic/craftax_classic.h c_reset/c_step. */
 #include "craftax_classic.h"
 #include <string.h>
 #include <stdint.h>

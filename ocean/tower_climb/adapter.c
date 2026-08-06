@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean tower_climb -> puffer-lean plugin ABI. Runs the REAL ocean/tower_climb/tower_climb.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean tower_climb -> pufferlean plugin ABI. Runs the REAL ocean/tower_climb/tower_climb.h c_reset/c_step. */
 #include "tower_climb.h"
 #include <string.h>
 #include <stdint.h>

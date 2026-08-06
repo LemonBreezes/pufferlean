@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean slimevolley → puffer-lean plugin ABI. MULTI-DISCRETE: 3 binary heads {2,2,2}. */
+/* Adapter: PufferLib Ocean slimevolley → pufferlean plugin ABI. MULTI-DISCRETE: 3 binary heads {2,2,2}. */
 #include "slimevolley.h"
 #include <string.h>
 #include <stdint.h>

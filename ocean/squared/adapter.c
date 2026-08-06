@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `squared` → puffer-lean plugin ABI. Runs the REAL ocean/squared/squared.h
+/* Adapter: PufferLib Ocean `squared` → pufferlean plugin ABI. Runs the REAL ocean/squared/squared.h
  * c_reset/c_step (random target via rand_r, uint8 grid obs). Build via ocean/build.sh. */
 #include "squared.h"
 #include <string.h>

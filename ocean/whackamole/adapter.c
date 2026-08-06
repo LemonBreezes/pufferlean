@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean whackamole -> puffer-lean plugin ABI. Runs the REAL ocean/whackamole/whackamole.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean whackamole -> pufferlean plugin ABI. Runs the REAL ocean/whackamole/whackamole.h c_reset/c_step. */
 #include "whackamole.h"
 #include <string.h>
 #include <stdint.h>

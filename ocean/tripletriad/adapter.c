@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean tripletriad -> puffer-lean plugin ABI. Runs the REAL ocean/tripletriad/tripletriad.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean tripletriad -> pufferlean plugin ABI. Runs the REAL ocean/tripletriad/tripletriad.h c_reset/c_step. */
 #include "tripletriad.h"
 #include <string.h>
 #include <stdint.h>

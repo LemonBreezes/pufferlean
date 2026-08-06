@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `blastar` → puffer-lean plugin ABI. Runs the REAL ocean/blastar/blastar.h
+/* Adapter: PufferLib Ocean `blastar` → pufferlean plugin ABI. Runs the REAL ocean/blastar/blastar.h
  * c_reset/c_step (float obs, double actions, float terminals). Single-agent, one discrete action of 6. */
 #include "blastar.h"
 #include <string.h>

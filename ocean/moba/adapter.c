@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `moba` -> puffer-lean plugin ABI.
+/* Adapter: PufferLib Ocean `moba` -> pufferlean plugin ABI.
  * MOBA (Dota-like) env. MULTI-DISCRETE: 6 heads {7,7,3,2,2,2}
  *   head0/1: move vel_y/vel_x (0..6), head2: attack target mode (0..2),
  *   heads 3/4/5: use Q/W/E (0..1).

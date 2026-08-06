@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Direct output-parity checks of pufferlib-lean's MATH against the ACTUAL PufferLib library.
+"""Direct output-parity checks of pufferlean's MATH against the ACTUAL PufferLib library.
 
 Runs INSIDE the PufferLib venv (needs torch + pufferlib + a compiled `_C`). Each check drives the
 REAL PufferLib code — the compiled CUDA V-Trace kernel, the real `pufferlib.muon.Muon` optimizer,
 and the real `pufferlib.models` MinGRU network — and compares it to the same reference algorithm
-pufferlib-lean's FFI kernels are verified against (`tools/vtrace_ref.py`, `tools/mingru_ref.py`,
+pufferlean's FFI kernels are verified against (`tools/vtrace_ref.py`, `tools/mingru_ref.py`,
 `tools/puffer_ref.py`). Emits one JSON line per check.
 
     cd ~/src/PufferLib && unset LD_LIBRARY_PATH && .venv/bin/python <this> --tools <lean>/tools
@@ -238,7 +238,7 @@ def perf_breakout(steps):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tools", default=os.path.dirname(os.path.abspath(__file__)),
-                    help="path to the pufferlib-lean tools/ dir (for mingru_ref)")
+                    help="path to the pufferlean tools/ dir (for mingru_ref)")
     ap.add_argument("--perf-steps", type=int, default=0,
                     help="if >0, also run the native PufferLib breakout trainer for this many steps and report SPS")
     args = ap.parse_args()

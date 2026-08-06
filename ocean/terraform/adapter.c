@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `terraform` -> puffer-lean plugin ABI. MULTI-AGENT MULTI-DISCRETE:
+/* Adapter: PufferLib Ocean `terraform` -> pufferlean plugin ABI. MULTI-AGENT MULTI-DISCRETE:
  * num_agents dozers per instance, 3 discrete heads (ACT_SIZES {5,5,3}), FloatTensor 319-dim obs.
  * Mirrors binding.c my_init (config -> rng -> init) then drives the REAL terraform c_reset/c_step
  * (which auto-resets internally on reset_frequency / when the map is solved). */

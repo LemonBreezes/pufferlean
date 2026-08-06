@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean `breakout` → puffer-lean plugin ABI. Runs the REAL breakout.h physics
+/* Adapter: PufferLib Ocean `breakout` → pufferlean plugin ABI. Runs the REAL breakout.h physics
  * (float obs 10+num_bricks, sinf/cosf paddle bounce, rand_r fire). Config defaults from breakout.ini;
  * `frameskip` overridable. */
 #include "breakout.h"

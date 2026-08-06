@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean enduro -> puffer-lean plugin ABI. Runs the REAL ocean/enduro/enduro.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean enduro -> pufferlean plugin ABI. Runs the REAL ocean/enduro/enduro.h c_reset/c_step. */
 #include "enduro.h"
 #include <string.h>
 #include <stdint.h>

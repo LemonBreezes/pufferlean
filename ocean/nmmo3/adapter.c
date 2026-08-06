@@ -1,4 +1,4 @@
-/* Adapter: PufferLib Ocean nmmo3 -> puffer-lean plugin ABI. Runs the REAL ocean/nmmo3/nmmo3.h c_reset/c_step. */
+/* Adapter: PufferLib Ocean nmmo3 -> pufferlean plugin ABI. Runs the REAL ocean/nmmo3/nmmo3.h c_reset/c_step. */
 #include "nmmo3.h"
 #include <string.h>
 #include <stdint.h>
