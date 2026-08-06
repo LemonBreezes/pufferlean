@@ -38,6 +38,18 @@
 extern int g_mgLossOn;
 extern double g_mgLoss[7];
 
+/* GPU-resident LSTM BPTT (ffi/puffercuda.cu). Fills gOut[P] and returns 1 on success; returns 0 (no
+   usable device / unsupported shape) so the two BLAS BPTT kernels below run their CPU fallback. On --log
+   render frames `outHostOrNull` receives the T·B·O logits for the shared dashboard-loss reducer. useF32
+   picks cublasSgemm (the f32 tier) vs cublasDgemm (the f64 default). */
+extern int cuda_lstm_ppo_grad_batch(
+    const double* pp, const double* obsB, const double* actA, const double* advA,
+    const double* retA, const double* oldA, const double* termA,
+    const double* h0s, const double* c0s, size_t B, size_t T, size_t H, size_t D, size_t A,
+    double vfCoef, double entCoef, double clipEps, double* gOut, double* outHostOrNull, int useF32);
+/* PUFFER_LSTM_GPU=0 forces the CPU BLAS path (A/B + the CPU-oracle cross-check); default uses the GPU. */
+static int lstm_gpu_off(void){ static int v=-1; if(v<0){ const char* e=getenv("PUFFER_LSTM_GPU"); v=(e&&e[0]=='0'); } return v; }
+
 /* --- helpers ------------------------------------------------------------------ */
 static inline void bias_relu(double* Y, const double* b, size_t N, size_t H) {
   for (size_t i = 0; i < N; i++)
@@ -898,6 +910,18 @@ LEAN_EXPORT lean_obj_res lean_ffi_lstm_ppo_grad_batch_blas(
   const double* h0s = lean_float_array_cptr(h0sa); const double* c0s = lean_float_array_cptr(c0sa);
   lean_object* go = lean_alloc_sarray(sizeof(double), P, P);
   double* g = lean_float_array_cptr(go);
+  /* GPU-resident BPTT (device twin of this function); falls through to the CPU BLAS code below if no
+     usable device / unsupported shape. Same f64 tolerance vs the scalar oracle (verify-lstm-blas). */
+  if (!lstm_gpu_off()) {
+    double* outH = g_mgLossOn ? (double*)malloc(sizeof(double)*T*O*B) : NULL;
+    if (cuda_lstm_ppo_grad_batch(pp, obsB, actA, advA, retA, oldA, termA, h0s, c0s,
+                                 B, T, H, D, A, vfCoef, entCoef, clipEps, g, outH, 0)) {
+      if (outH) { lstm_surface_losses(outH, actA, advA, retA, oldA, T, B, A, O, vfCoef, entCoef, clipEps); free(outH); }
+      lean_dec(pa);lean_dec(obsBa);lean_dec(actsa);lean_dec(advsa);lean_dec(retsa);lean_dec(oldlpsa);lean_dec(termsa);lean_dec(h0sa);lean_dec(c0sa);
+      return go;
+    }
+    if (outH) free(outH);
+  }
   for (size_t t = 0; t < P; t++) g[t] = 0.0;
   double* gWx = g; double* gWh = gWx + H4*D; double* gbih = gWh + H4*H; double* gWo = gbih + H4; double* gbo = gWo + O*H;
   size_t BH = B*H, BH4 = B*H4, BO = B*O;
@@ -1019,6 +1043,18 @@ LEAN_EXPORT lean_obj_res lean_ffi_lstm_ppo_grad_batch_blas_f32(
   const double* h0sd = lean_float_array_cptr(h0sa); const double* c0sd = lean_float_array_cptr(c0sa);
   lean_object* go = lean_alloc_sarray(sizeof(double), P, P);
   double* g = lean_float_array_cptr(go);
+  /* GPU-resident BPTT, f32 tier (cublasSgemm); falls through to the CPU cblas_sgemm code below if no
+     usable device / unsupported shape. Verified vs the f64 path by verify-lstm-grad-f32. */
+  if (!lstm_gpu_off()) {
+    double* outH = g_mgLossOn ? (double*)malloc(sizeof(double)*T*O*B) : NULL;
+    if (cuda_lstm_ppo_grad_batch(ppd, obsBd, actA, advA, retA, oldA, termA, h0sd, c0sd,
+                                 B, T, H, D, A, vfCoef, entCoef, clipEps, g, outH, 1)) {
+      if (outH) { lstm_surface_losses(outH, actA, advA, retA, oldA, T, B, A, O, vfCoef, entCoef, clipEps); free(outH); }
+      lean_dec(pa);lean_dec(obsBa);lean_dec(actsa);lean_dec(advsa);lean_dec(retsa);lean_dec(oldlpsa);lean_dec(termsa);lean_dec(h0sa);lean_dec(c0sa);
+      return go;
+    }
+    if (outH) free(outH);
+  }
   double* ogWx = g; double* ogWh = ogWx + H4*D; double* ogbih = ogWh + H4*H; double* ogWo = ogbih + H4; double* ogbo = ogWo + O*H;
 
   float* Wx = (float*)malloc(sizeof(float)*H4*D); float* Wh = (float*)malloc(sizeof(float)*H4*H);

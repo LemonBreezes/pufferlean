@@ -6783,3 +6783,228 @@ extern "C" LEAN_EXPORT lean_obj_res lean_cuda_sincosf(lean_obj_arg anga, size_t 
   lean_dec(anga); return Oo;
 }
 
+/* ===== GPU-resident batched LSTM+PPO truncated-BPTT gradient ====================================
+   Device twin of pufferblas.c's `lean_ffi_lstm_ppo_grad_batch_blas` (f64, cblas) and its f32 twin.
+   Same algorithm, same math — every cblas_dgemm/sgemm moves to cublasDgemm/Sgemm and the gate
+   forward/backward + PPO objective become elementwise CUDA kernels; obs + all per-timestep
+   activations (II/FF/GG/OO/TC/HP/CP/HT/OUT/dG) stay DEVICE-RESIDENT across the T-step recurrence, so
+   only the inputs H2D once and the P-length gradient (plus, on --log render frames, the logits) D2H.
+   Reduction order differs from cblas (blocked cuBLAS GEMMs + tree colsums) ⇒ matches the scalar/Lean
+   oracle to f64 TOLERANCE (~1e-11), not bit-exactly — the same trade the CPU-BLAS path already makes
+   (verify-lstm-blas). Deterministic: cuBLAS GEMMs pick a fixed algorithm per shape and the kernels use
+   no atomics / fixed-order block reductions ⇒ run-to-run identical.
+
+   The BATCHING vs the CPU per-timestep loop: the input projection X·Wxᵀ, the output head HT·Woᵀ, the
+   output-head backward dOut·Wo, and all four weight gradients (gWx/gWh/gWo + the two bias colsums) do
+   NOT depend on the recurrence, so each is ONE big GEMM/colsum over the whole [T·B] batch instead of T
+   small ones. Only the recurrent projection Hprev·Whᵀ (fwd) and dG·Wh (bwd) stay per-timestep — the
+   sequential critical path. Same operation set as the oracle, just re-associated reductions (tolerance,
+   not bit-exact — as documented above). Called from pufferblas.c (extern "C"); returns 1 on success
+   (gOut[P] filled), 0 to signal "no usable device / unsupported shape" so the caller runs its CPU BLAS
+   path. `outHostOrNull` (non-NULL only on --log render frames) receives the T·B·O logits for the shared
+   dashboard-loss reducer. `useF32`: 0 = cublasDgemm f64 (the default, ~1e-11 vs the oracle); 1 = the
+   cublasSgemm f32 tier (PUFFER_LSTM_F32, ~1e-6 vs the f64 path, verify-lstm-grad-f32). ================ */
+__device__ __forceinline__ float  l_exp(float x){ return expf(x); }
+__device__ __forceinline__ double l_exp(double x){ return exp(x); }
+__device__ __forceinline__ float  l_tanh(float x){ return tanhf(x); }
+__device__ __forceinline__ double l_tanh(double x){ return tanh(x); }
+__device__ __forceinline__ float  l_log(float x){ return logf(x); }
+__device__ __forceinline__ double l_log(double x){ return log(x); }
+template<typename R> __device__ __forceinline__ R l_sig(R x){ return (R)1/((R)1+l_exp(-x)); }
+
+/* reset the recurrent (h,c) state at step t for sequences whose PREVIOUS step terminated (t>0 only) */
+template<typename R>
+__global__ void k_lstm_reset(R* Hst, R* Cst, const double* term, int B, int H, int t){
+  long idx=(long)blockIdx.x*blockDim.x+threadIdx.x; if(idx>=(long)B*H) return;
+  int b=(int)(idx/H);
+  if(term[(long)(t-1)*B+b]!=0.0){ Hst[idx]=(R)0; Cst[idx]=(R)0; }
+}
+/* forward gate cell: gates from Gin (precomputed X·Wxᵀ, slice t) + Grec (Hprev·Whᵀ) + bih; store the
+   OLD (h,c) into HP/CP, the activations, and update the running (Hst,Cst). Mirrors pufferblas.c 927-935. */
+template<typename R>
+__global__ void k_lstm_gate_fwd(const R* Gin, const R* Grec, const R* bih,
+    R* Hst, R* Cst, R* II, R* FF, R* GG, R* OO, R* TC, R* HT, R* HP, R* CP, int B, int H){
+  long idx=(long)blockIdx.x*blockDim.x+threadIdx.x; if(idx>=(long)B*H) return;
+  int b=(int)(idx/H), j=(int)(idx%H); int H4=4*H; long g0=(long)b*H4;
+  R oldH=Hst[idx], oldC=Cst[idx]; HP[idx]=oldH; CP[idx]=oldC;
+  R gi=Gin[g0+j]     +Grec[g0+j]     +bih[j];
+  R gf=Gin[g0+H+j]   +Grec[g0+H+j]   +bih[H+j];
+  R gg=Gin[g0+2*H+j] +Grec[g0+2*H+j] +bih[2*H+j];
+  R go=Gin[g0+3*H+j] +Grec[g0+3*H+j] +bih[3*H+j];
+  R iv=l_sig(gi), fv=l_sig(gf), gv=l_tanh(gg), ov=l_sig(go);
+  R cv=fv*oldC+iv*gv; R tcv=l_tanh(cv); R hv=ov*tcv;
+  II[idx]=iv; FF[idx]=fv; GG[idx]=gv; OO[idx]=ov; TC[idx]=tcv; HT[idx]=hv;
+  Cst[idx]=cv; Hst[idx]=hv;
+}
+template<typename R>
+__global__ void k_lstm_add_bias(R* Y, const R* b, long rows, int cols){
+  long idx=(long)blockIdx.x*blockDim.x+threadIdx.x; if(idx>=rows*(long)cols) return;
+  Y[idx]+=b[idx%cols];
+}
+/* per-row single-categorical PPO backward over all T·B rows at once (LSTM head: UNCLIPPED value loss).
+   Mirrors pufferblas.c 943-954 verbatim (f64) / its f32 twin (expf/logf), no max-subtraction in the lse. */
+template<typename R>
+__global__ void k_lstm_ppo_dout(const R* OUT, const double* actA, const double* advA,
+    const double* retA, const double* oldA, R* dOut, long TB, int A, int O,
+    R vfCoef, R entCoef, R clipEps){
+  long n=(long)blockIdx.x*blockDim.x+threadIdx.x; if(n>=TB) return;
+  const R* out=OUT+n*O; R* dout=dOut+n*O;
+  int a=(int)actA[n]; R adv=(R)advA[n], ret=(R)retA[n], oldLogp=(R)oldA[n];
+  R sumexp=(R)0; for(int k=0;k<A;k++) sumexp+=l_exp(out[k]); R lse=l_log(sumexp);
+  R pout=(R)0; R pk[64];
+  for(int k=0;k<A;k++){ pk[k]=l_exp(out[k]-lse); pout+=pk[k]*out[k]; }
+  R logpA=out[a]-lse; R ratio=l_exp(logpA-oldLogp); R lo=(R)1-clipEps, hi=(R)1+clipEps;
+  R ratioC=ratio<lo?lo:(ratio>hi?hi:ratio); R surr1=adv*ratio, surr2=adv*ratioC;
+  R dPol; if(surr1<=surr2) dPol=adv*ratio; else { R cg=(lo<ratio&&ratio<hi)?(R)1:(R)0; dPol=adv*cg*ratio; }
+  for(int k=0;k<A;k++){ R dp=dPol*(((k==a)?(R)1:(R)0)-pk[k]); R de=entCoef*pk[k]*(pout-out[k]); dout[k]=dp+de; }
+  dout[A]=-vfCoef*(out[A]-ret);
+}
+/* backward gate cell at step t: dHt = dHfromOut[t] + dHnext (folded in); produces dG[t] (B×H4) and the
+   cell-state carry dCprevG. Mirrors pufferblas.c 961-972. */
+template<typename R>
+__global__ void k_lstm_gate_bwd(const R* II, const R* FF, const R* GG, const R* OO, const R* TC,
+    const R* CP, const R* dHfromOut, const R* dHnext, const R* dCnext, R* dCprevG, R* dG, int B, int H){
+  long idx=(long)blockIdx.x*blockDim.x+threadIdx.x; if(idx>=(long)B*H) return;
+  int b=(int)(idx/H), j=(int)(idx%H); int H4=4*H; long g0=(long)b*H4;
+  R iv=II[idx], fv=FF[idx], gv=GG[idx], ov=OO[idx], tcv=TC[idx], cprev=CP[idx];
+  R dh=dHfromOut[idx]+dHnext[idx];
+  R dc=dCnext[idx]+dh*ov*((R)1-tcv*tcv);
+  R do_=dh*tcv; R df=dc*cprev, di=dc*gv, dg_=dc*iv;
+  dCprevG[idx]=dc*fv;
+  dG[g0+j]     =di*iv*((R)1-iv);
+  dG[g0+H+j]   =df*fv*((R)1-fv);
+  dG[g0+2*H+j] =dg_*((R)1-gv*gv);
+  dG[g0+3*H+j] =do_*ov*((R)1-ov);
+}
+/* propagate the (h,c) grad to the previous step unless a terminal broke the recurrence. pufferblas 978-984. */
+template<typename R>
+__global__ void k_lstm_carry(R* dHnext, R* dCnext, const R* dHprevG, const R* dCprevG,
+    const double* term, int B, int H, int t){
+  long idx=(long)blockIdx.x*blockDim.x+threadIdx.x; if(idx>=(long)B*H) return;
+  int b=(int)(idx/H);
+  int flow=(t>0 && term[(long)(t-1)*B+b]==0.0);
+  if(flow){ dHnext[idx]=dHprevG[idx]; dCnext[idx]=dCprevG[idx]; }
+  else    { dHnext[idx]=(R)0;         dCnext[idx]=(R)0; }
+}
+/* deterministic bias gradient: one block per column tree-reduces all `rows` rows in a fixed order
+   (no atomics ⇒ run-to-run identical; order differs from the serial CPU sum ⇒ f64 tolerance). Single
+   shot over the whole [T·B] batch, so it OVERWRITES (the CPU accumulates per-timestep to the same total). */
+template<typename R>
+__global__ void k_lstm_colsum(R* gb, const R* M, long rows, int J){
+  __shared__ R sh[256];
+  int j=blockIdx.x; if(j>=J) return; int tid=threadIdx.x, nb=blockDim.x;
+  R p=(R)0; for(long r=tid; r<rows; r+=nb) p+=M[r*(long)J+j]; sh[tid]=p; __syncthreads();
+  for(int s=nb/2;s>0;s>>=1){ if(tid<s) sh[tid]+=sh[tid+s]; __syncthreads(); }
+  if(tid==0) gb[j]=sh[0];
+}
+
+/* row-major C[M×N] = opA(A)·opB(B) + beta·C via the col-major swap (pass B then A), f64 / f32 overloads
+   (same identity as the MinGRU sgemm_rm). alpha is always 1. */
+static cublasStatus_t lstm_gemm(cublasHandle_t h, cublasOperation_t opA, cublasOperation_t opB,
+    int M, int N, int K, const double* A, int lda, const double* B, int ldb, double beta, double* C, int ldc){
+  double al=1.0; return cublasDgemm(h, opB, opA, N, M, K, &al, B, ldb, A, lda, &beta, C, ldc);
+}
+static cublasStatus_t lstm_gemm(cublasHandle_t h, cublasOperation_t opA, cublasOperation_t opB,
+    int M, int N, int K, const float* A, int lda, const float* B, int ldb, float beta, float* C, int ldc){
+  float al=1.0f; return cublasSgemm(h, opB, opA, N, M, K, &al, B, ldb, A, lda, &beta, C, ldc);
+}
+/* host→device upload with an f64→R cast for the f32 tier (direct memcpy when R==double). */
+static void lstm_up(double* d, const double* s, size_t n){ cudaMemcpy(d,s,n*sizeof(double),cudaMemcpyHostToDevice); }
+static void lstm_up(float*  d, const double* s, size_t n){ float* hbuf=(float*)malloc(n*sizeof(float));
+  for(size_t i=0;i<n;i++) hbuf[i]=(float)s[i]; cudaMemcpy(d,hbuf,n*sizeof(float),cudaMemcpyHostToDevice); free(hbuf); }
+/* device→host download widening R→f64 (direct memcpy when R==double). */
+static void lstm_down(double* dst, const double* dsrc, size_t n){ cudaMemcpy(dst,dsrc,n*sizeof(double),cudaMemcpyDeviceToHost); }
+static void lstm_down(double* dst, const float* dsrc, size_t n){ float* hbuf=(float*)malloc(n*sizeof(float));
+  cudaMemcpy(hbuf,dsrc,n*sizeof(float),cudaMemcpyDeviceToHost); for(size_t i=0;i<n;i++) dst[i]=(double)hbuf[i]; free(hbuf); }
+
+/* PERSISTENT device-buffer cache (shapes are constant across a training run ⇒ allocate once, reuse; the
+   f32 tier reuses the same slots since float ≤ double bytes). Grown, never shrunk; freed at process exit. */
+static void* g_lstm_buf[40]; static size_t g_lstm_sz[40];
+static void* lstm_slot(int i, size_t bytes){
+  if(g_lstm_sz[i]<bytes){ if(g_lstm_buf[i]) cudaFree(g_lstm_buf[i]);
+    if(cudaMalloc(&g_lstm_buf[i],bytes)!=cudaSuccess){ g_lstm_buf[i]=NULL; g_lstm_sz[i]=0; return NULL; }
+    g_lstm_sz[i]=bytes; }
+  return g_lstm_buf[i];
+}
+
+template<typename R>
+static int lstm_bptt_dev_R(const double* pp, const double* obsBd, const double* actAd,
+    const double* advAd, const double* retAd, const double* oldAd, const double* termAd,
+    const double* h0sd, const double* c0sd, size_t B, size_t T, size_t H, size_t D, size_t A,
+    double vfCoef, double entCoef, double clipEps, double* gOut, double* outHostOrNull){
+  cublasHandle_t hbl=cu_handle();
+  if(!hbl || B==0 || T==0 || H==0 || A>64) return 0;
+  size_t O=A+1, H4=4*H;
+  long TB=(long)T*(long)B; size_t BH=B*H, BH4=B*H4, sR=sizeof(R);
+  #define LS(i,n) (R*)lstm_slot((i),(size_t)(n)*sR)
+  R *dWx=LS(0,H4*D), *dWh=LS(1,H4*H), *dbih=LS(2,H4), *dWo=LS(3,O*H), *dbo=LS(4,O);
+  R *dObs=LS(5,(size_t)TB*D), *dGin=LS(6,(size_t)TB*H4);
+  R *dII=LS(7,(size_t)TB*H), *dFF=LS(8,(size_t)TB*H), *dGG=LS(9,(size_t)TB*H), *dOO=LS(10,(size_t)TB*H);
+  R *dTC=LS(11,(size_t)TB*H), *dHP=LS(12,(size_t)TB*H), *dCP=LS(13,(size_t)TB*H), *dHT=LS(14,(size_t)TB*H);
+  R *dOUT=LS(15,(size_t)TB*O), *dOutg=LS(16,(size_t)TB*O), *dHfromOut=LS(17,(size_t)TB*H), *dG=LS(18,(size_t)TB*H4);
+  R *dGrec=LS(19,BH4), *dHst=LS(20,BH), *dCst=LS(21,BH), *dHnext=LS(22,BH), *dCnext=LS(23,BH), *dHprevG=LS(24,BH), *dCprevG=LS(25,BH);
+  R *gWx=LS(26,H4*D), *gWh=LS(27,H4*H), *gbih=LS(28,H4), *gWo=LS(29,O*H), *gbo=LS(30,O);
+  double *dAct=(double*)lstm_slot(31,(size_t)TB*8), *dAdv=(double*)lstm_slot(32,(size_t)TB*8);
+  double *dRet=(double*)lstm_slot(33,(size_t)TB*8), *dOld=(double*)lstm_slot(34,(size_t)TB*8), *dTrm=(double*)lstm_slot(35,(size_t)TB*8);
+  #undef LS
+  if(!(dWx&&dWh&&dbih&&dWo&&dbo&&dObs&&dGin&&dII&&dFF&&dGG&&dOO&&dTC&&dHP&&dCP&&dHT&&dOUT&&dOutg&&dHfromOut&&dG
+     &&dGrec&&dHst&&dCst&&dHnext&&dCnext&&dHprevG&&dCprevG&&gWx&&gWh&&gbih&&gWo&&gbo&&dAct&&dAdv&&dRet&&dOld&&dTrm))
+    return 0;
+  /* H2D inputs (once; the f32 tier casts on the host during the copy) */
+  { const double* pWx=pp; const double* pWh=pWx+H4*D; const double* pbih=pWh+H4*H;
+    const double* pWo=pbih+H4; const double* pbo=pWo+O*H;
+    lstm_up(dWx,pWx,H4*D); lstm_up(dWh,pWh,H4*H); lstm_up(dbih,pbih,H4); lstm_up(dWo,pWo,O*H); lstm_up(dbo,pbo,O);
+    lstm_up(dObs,obsBd,(size_t)TB*D); lstm_up(dHst,h0sd,BH); lstm_up(dCst,c0sd,BH); }
+  cudaMemcpy(dAct,actAd,(size_t)TB*8,cudaMemcpyHostToDevice); cudaMemcpy(dAdv,advAd,(size_t)TB*8,cudaMemcpyHostToDevice);
+  cudaMemcpy(dRet,retAd,(size_t)TB*8,cudaMemcpyHostToDevice); cudaMemcpy(dOld,oldAd,(size_t)TB*8,cudaMemcpyHostToDevice);
+  cudaMemcpy(dTrm,termAd,(size_t)TB*8,cudaMemcpyHostToDevice);
+  int Bk=256;
+  #define GD(x) ceildiv((long)(x),Bk)
+  /* ---- FORWARD ---- input projection over the WHOLE batch, then the sequential recurrent scan ---- */
+  lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)TB,(int)H4,(int)D, dObs,(int)D, dWx,(int)D, (R)0, dGin,(int)H4);
+  for(size_t t=0;t<T;t++){
+    if(t>0) k_lstm_reset<R><<<GD(BH),Bk>>>(dHst,dCst,dTrm,(int)B,(int)H,(int)t);
+    lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)B,(int)H4,(int)H, dHst,(int)H, dWh,(int)H, (R)0, dGrec,(int)H4);
+    size_t sBH=(size_t)t*BH;
+    k_lstm_gate_fwd<R><<<GD(BH),Bk>>>(dGin+(size_t)t*B*H4, dGrec, dbih, dHst, dCst,
+      dII+sBH,dFF+sBH,dGG+sBH,dOO+sBH,dTC+sBH,dHT+sBH,dHP+sBH,dCP+sBH,(int)B,(int)H);
+  }
+  lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)TB,(int)O,(int)H, dHT,(int)H, dWo,(int)H, (R)0, dOUT,(int)O);
+  k_lstm_add_bias<R><<<GD((long)TB*O),Bk>>>(dOUT,dbo,TB,(int)O);
+  /* ---- BACKWARD ---- PPO objective + non-recurrent grads batched, the (h,c) carry sequential ---- */
+  k_lstm_ppo_dout<R><<<GD(TB),Bk>>>(dOUT,dAct,dAdv,dRet,dOld,dOutg,TB,(int)A,(int)O,(R)vfCoef,(R)entCoef,(R)clipEps);
+  lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)O,(int)H,(int)TB, dOutg,(int)O, dHT,(int)H, (R)0, gWo,(int)H);
+  k_lstm_colsum<R><<<(int)O,256>>>(gbo,dOutg,TB,(int)O);
+  lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_N,(int)TB,(int)H,(int)O, dOutg,(int)O, dWo,(int)H, (R)0, dHfromOut,(int)H);
+  cudaMemset(dHnext,0,BH*sR); cudaMemset(dCnext,0,BH*sR);
+  for(size_t tt=T; tt-->0; ){
+    size_t t=tt, sBH=(size_t)t*BH;
+    k_lstm_gate_bwd<R><<<GD(BH),Bk>>>(dII+sBH,dFF+sBH,dGG+sBH,dOO+sBH,dTC+sBH,dCP+sBH,
+      dHfromOut+sBH, dHnext,dCnext, dCprevG, dG+(size_t)t*BH4, (int)B,(int)H);
+    lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_N,(int)B,(int)H,(int)H4, dG+(size_t)t*BH4,(int)H4, dWh,(int)H, (R)0, dHprevG,(int)H);
+    k_lstm_carry<R><<<GD(BH),Bk>>>(dHnext,dCnext, dHprevG,dCprevG, dTrm,(int)B,(int)H,(int)t);
+  }
+  lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)H4,(int)D,(int)TB, dG,(int)H4, dObs,(int)D, (R)0, gWx,(int)D);
+  lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)H4,(int)H,(int)TB, dG,(int)H4, dHP,(int)H, (R)0, gWh,(int)H);
+  k_lstm_colsum<R><<<(int)H4,256>>>(gbih,dG,TB,(int)H4);
+  #undef GD
+  cudaDeviceSynchronize();
+  if(cudaGetLastError()!=cudaSuccess) return 0;   /* kernel/launch fault ⇒ let the caller run the CPU path */
+  /* D2H the gradient in the flat [gWx|gWh|gbih|gWo|gbo] layout (widened to f64 for the f32 tier). */
+  double* g=gOut;
+  lstm_down(g,gWx,H4*D); g+=H4*D; lstm_down(g,gWh,H4*H); g+=H4*H; lstm_down(g,gbih,H4); g+=H4;
+  lstm_down(g,gWo,O*H); g+=O*H; lstm_down(g,gbo,O);
+  if(outHostOrNull) lstm_down(outHostOrNull,dOUT,(size_t)TB*O);
+  return 1;
+}
+
+/* C entry called from pufferblas.c: dispatch the f64 default vs the f32 tier. */
+extern "C" int cuda_lstm_ppo_grad_batch(
+    const double* pp, const double* obsB, const double* actA, const double* advA,
+    const double* retA, const double* oldA, const double* termA,
+    const double* h0s, const double* c0s, size_t B, size_t T, size_t H, size_t D, size_t A,
+    double vfCoef, double entCoef, double clipEps, double* gOut, double* outHostOrNull, int useF32){
+  if(useF32) return lstm_bptt_dev_R<float >(pp,obsB,actA,advA,retA,oldA,termA,h0s,c0s,B,T,H,D,A,vfCoef,entCoef,clipEps,gOut,outHostOrNull);
+  return            lstm_bptt_dev_R<double>(pp,obsB,actA,advA,retA,oldA,termA,h0s,c0s,B,T,H,D,A,vfCoef,entCoef,clipEps,gOut,outHostOrNull);
+}
+
