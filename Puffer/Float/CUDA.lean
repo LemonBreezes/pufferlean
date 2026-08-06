@@ -188,6 +188,21 @@ opaque cudaMlpForwardFFI (params obs : FloatArray) (N D H O : USize) (bf16 : UIn
 opaque cudaPluginRolloutFFI (h policyH : USize) (obs0 : FloatArray) (N D H A T : USize)
   (bf16 : UInt8) (rolloutRng : UInt64) : IO FloatArray
 
+/-- **Native device-resident LSTM rollout** (recurrent single-discrete plugin trainer): runs the whole
+    `T`-horizon in one FFI call — LSTM params uploaded once, per step obs H2D → device forward
+    (cublasDgemm gate/head GEMMs + `k_lstm_gate_fwd` cell) → device sample (`k_sample`, the SAME per-env
+    splitmix64 stream as the CPU sampler) → threaded plugin env-step → TIME-MAJOR SoA column scatter.
+    The recurrent `(h,c)` live device-resident, threaded across steps and reset at terminals
+    (`k_lstm_reset`). Replaces the Lean per-timestep loop (boxed `Array (Array Transition)` build +
+    host SoA transpose). Returns `[obs(NT·D); act(NT); logp(NT); val(NT); rew(NT); term(NT); bootV(N);
+    finalObs(N·D); finalH(N·H); finalC(N·H)]`, row `s·N+e` (time-major — the layout the BPTT consumes
+    directly). Forward matches `lean_ffi_lstm_fwd_step_batch_blas` to ~1e-11 (cuBLAS vs cblas reduction
+    order, same trade as the GPU BPTT); `k_sample` is bit-exact vs the CPU sampler; RNG stream identical
+    to the old loop (`rolloutRng + s·N·G`, caller advances `rng` by `N·T·G`). IO — it steps the env. -/
+@[extern "lean_cuda_plugin_rollout_lstm"]
+opaque cudaPluginRolloutLstmFFI (h : USize) (params obs0 h0 c0 : FloatArray) (N D H A T : USize)
+  (rolloutRng : UInt64) : IO FloatArray
+
 /-- **Enable the buffered + graph-replayed rollout path** for `cudaPluginRolloutFFI` (an N-way
     concurrent-stream buffer split + per-buffer CUDA graph replay of the per-step forward — already
     built, already measured breakout MLP@4096 4.73M→7.25M SPS, but dormant since nothing in the CLI

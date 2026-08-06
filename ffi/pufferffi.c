@@ -970,6 +970,45 @@ LEAN_EXPORT lean_obj_res lean_ffi_gae_soa(lean_obj_arg valsA, lean_obj_arg rewsA
   return outO;
 }
 
+/* GAE WITH a bootstrap value + advantage batch-normalization, in native C — the LSTM plugin trainer's
+   `computeGAEBoot` + adv-normalize, all on TIME-MAJOR rollout columns (row = t·N+n). Per env n, backward
+   over t = T-1 … 0:  nnt = term[t]>0.5?0:1;  vNext = (t+1<T)? val[t+1] : bootV[n];
+   delta = rew[t] + gamma·vNext·nnt − val[t];  A = delta + gamma·lam·nnt·A;  adv = A;  ret = A + val[t].
+   Then advantages are normalized over the whole N·T (mean/std, +1e-8). Identical recurrence + norm form
+   to the old boxed-`Array Float` Lean loop (which was the biggest host cost after the native rollout —
+   ~50ms/update of per-element boxing); returns [adv(N·T); ret(N·T)] time-major, ready for the BPTT. */
+LEAN_EXPORT lean_obj_res lean_ffi_lstm_gae_boot_norm(
+    lean_obj_arg valsA, lean_obj_arg rewsA, lean_obj_arg termsA, lean_obj_arg bootA,
+    size_t N, size_t T, double gamma, double lam){
+  const double* vals = lean_float_array_cptr(valsA);
+  const double* rews = lean_float_array_cptr(rewsA);
+  const double* terms = lean_float_array_cptr(termsA);
+  const double* bootV = lean_float_array_cptr(bootA);
+  size_t NT = N*T;
+  lean_object* outO = lean_alloc_sarray(sizeof(double), 2*NT, 2*NT);
+  double* out = lean_float_array_cptr(outO);
+  double* adv = out; double* ret = out + NT;
+  for(size_t n=0;n<N;n++){
+    double lastA = 0.0;
+    for(size_t i=0;i<T;i++){
+      size_t t = T-1-i, idx = t*N+n;
+      double nnt = (terms[idx] > 0.5) ? 0.0 : 1.0;
+      double vNext = (t+1<T) ? vals[(t+1)*N+n] : bootV[n];
+      double delta = rews[idx] + gamma*vNext*nnt - vals[idx];
+      lastA = delta + gamma*lam*nnt*lastA;
+      adv[idx] = lastA; ret[idx] = lastA + vals[idx];
+    }
+  }
+  size_t den = NT>0?NT:1;
+  double sum=0.0; for(size_t i=0;i<NT;i++) sum+=adv[i];
+  double mean=sum/(double)den;
+  double vsum=0.0; for(size_t i=0;i<NT;i++){ double d=adv[i]-mean; vsum+=d*d; }
+  double inv=1.0/(sqrt(vsum/(double)den)+1e-8);
+  for(size_t i=0;i<NT;i++) adv[i]=(adv[i]-mean)*inv;
+  lean_dec(valsA); lean_dec(rewsA); lean_dec(termsA); lean_dec(bootA);
+  return outO;
+}
+
 /* Flat per-epoch shuffle in C — the bit-exact twin of `epochs ×` Puffer.RL.VecTrain.shuffleIdx, replacing
    the interpreted-Lean `permFlat` loop (epochs·NT Array.push/update, the biggest host-side cost). Returns
    the f64-encoded permutation `perm[epochs·NT]`: epoch e's shuffle is perm[e·NT … (e+1)·NT). Fisher–Yates

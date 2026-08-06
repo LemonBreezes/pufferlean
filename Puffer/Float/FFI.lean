@@ -84,6 +84,13 @@ opaque sliceFFI (arr : FloatArray) (off len : USize) : FloatArray
 @[extern "lean_ffi_gae_soa"]
 opaque gaeSoaFFI (vals rews terms : FloatArray) (N T : USize) (gamma lam : Float) : FloatArray
 
+/-- GAE with a bootstrap value + advantage batch-normalization in native C — the LSTM plugin trainer's
+    `computeGAEBoot` + adv-normalize over TIME-MAJOR rollout columns (row = t·N+n). Returns
+    `[adv(N·T); ret(N·T)]` time-major (advantages already normalized). Replaces the boxed-`Array Float`
+    Lean GAE loop (per-element boxing was ~50ms/update). -/
+@[extern "lean_ffi_lstm_gae_boot_norm"]
+opaque lstmGaeBootNormFFI (vals rews terms bootV : FloatArray) (N T : USize) (gamma lam : Float) : FloatArray
+
 /-- Flat per-epoch shuffle in C — the bit-exact twin of `epochs ×` `shuffleIdx` (Fisher–Yates + splitmix64
     `rngNext`), replacing the interpreted-Lean `permFlat` loop (`epochs·NT` `Array.push`, the biggest
     host-side per-update cost). Returns `perm[epochs·NT]` (f64-encoded indices; epoch `e` = `perm[e·NT …]`).

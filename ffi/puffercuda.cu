@@ -6927,6 +6927,20 @@ static void* lstm_slot(int i, size_t bytes){
   return g_lstm_buf[i];
 }
 
+/* DEVICE-RESIDENT rollout obs trajectory (f64, TIME-MAJOR TB·D): the native LSTM rollout stamps it, and
+   the f64 BPTT below reads it in place instead of re-uploading obs on EVERY epoch (obs is the same across
+   all `epochs` passes — only the weights change). Bit-identical to the host-obs path (same f64 bytes the
+   H2D would have copied). The host obs column is still returned by the rollout, so a stale/absent stamp
+   (device-alloc failure) just falls back to the H2D — never garbage. Single-run global (a `puffer train`
+   process runs one trainer); untouched by the MLP/MinGRU trainers, which never call the LSTM BPTT. */
+static double* g_dLstmObs=NULL; static size_t g_dLstmObsSz=0;
+static int g_dLstmObs_valid=0; static long g_dLstmObs_B=0, g_dLstmObs_T=0, g_dLstmObs_D=0;
+static double* lstm_obs_traj(size_t elems){ size_t bytes=elems*8;
+  if(g_dLstmObsSz<bytes){ if(g_dLstmObs) cudaFree(g_dLstmObs);
+    if(cudaMalloc((void**)&g_dLstmObs,bytes)!=cudaSuccess){ g_dLstmObs=NULL; g_dLstmObsSz=0; return NULL; }
+    g_dLstmObsSz=bytes; }
+  return g_dLstmObs; }
+
 template<typename R>
 static int lstm_bptt_dev_R(const double* pp, const double* obsBd, const double* actAd,
     const double* advAd, const double* retAd, const double* oldAd, const double* termAd,
@@ -6937,8 +6951,11 @@ static int lstm_bptt_dev_R(const double* pp, const double* obsBd, const double* 
   size_t O=A+1, H4=4*H;
   long TB=(long)T*(long)B; size_t BH=B*H, BH4=B*H4, sR=sizeof(R);
   #define LS(i,n) (R*)lstm_slot((i),(size_t)(n)*sR)
+  /* device-resident obs from the native rollout (f64 tier only): read it in place, skip the per-epoch H2D */
+  int obsResident=(sR==8 && g_dLstmObs_valid && g_dLstmObs!=NULL
+                   && g_dLstmObs_B==(long)B && g_dLstmObs_T==(long)T && g_dLstmObs_D==(long)D);
   R *dWx=LS(0,H4*D), *dWh=LS(1,H4*H), *dbih=LS(2,H4), *dWo=LS(3,O*H), *dbo=LS(4,O);
-  R *dObs=LS(5,(size_t)TB*D), *dGin=LS(6,(size_t)TB*H4);
+  R *dObs=obsResident? (R*)g_dLstmObs : LS(5,(size_t)TB*D), *dGin=LS(6,(size_t)TB*H4);
   R *dII=LS(7,(size_t)TB*H), *dFF=LS(8,(size_t)TB*H), *dGG=LS(9,(size_t)TB*H), *dOO=LS(10,(size_t)TB*H);
   R *dTC=LS(11,(size_t)TB*H), *dHP=LS(12,(size_t)TB*H), *dCP=LS(13,(size_t)TB*H), *dHT=LS(14,(size_t)TB*H);
   R *dOUT=LS(15,(size_t)TB*O), *dOutg=LS(16,(size_t)TB*O), *dHfromOut=LS(17,(size_t)TB*H), *dG=LS(18,(size_t)TB*H4);
@@ -6954,7 +6971,8 @@ static int lstm_bptt_dev_R(const double* pp, const double* obsBd, const double* 
   { const double* pWx=pp; const double* pWh=pWx+H4*D; const double* pbih=pWh+H4*H;
     const double* pWo=pbih+H4; const double* pbo=pWo+O*H;
     lstm_up(dWx,pWx,H4*D); lstm_up(dWh,pWh,H4*H); lstm_up(dbih,pbih,H4); lstm_up(dWo,pWo,O*H); lstm_up(dbo,pbo,O);
-    lstm_up(dObs,obsBd,(size_t)TB*D); lstm_up(dHst,h0sd,BH); lstm_up(dCst,c0sd,BH); }
+    if(!obsResident) lstm_up(dObs,obsBd,(size_t)TB*D);          /* resident ⇒ obs already on-device */
+    lstm_up(dHst,h0sd,BH); lstm_up(dCst,c0sd,BH); }
   cudaMemcpy(dAct,actAd,(size_t)TB*8,cudaMemcpyHostToDevice); cudaMemcpy(dAdv,advAd,(size_t)TB*8,cudaMemcpyHostToDevice);
   cudaMemcpy(dRet,retAd,(size_t)TB*8,cudaMemcpyHostToDevice); cudaMemcpy(dOld,oldAd,(size_t)TB*8,cudaMemcpyHostToDevice);
   cudaMemcpy(dTrm,termAd,(size_t)TB*8,cudaMemcpyHostToDevice);
@@ -7006,5 +7024,167 @@ extern "C" int cuda_lstm_ppo_grad_batch(
     double vfCoef, double entCoef, double clipEps, double* gOut, double* outHostOrNull, int useF32){
   if(useF32) return lstm_bptt_dev_R<float >(pp,obsB,actA,advA,retA,oldA,termA,h0s,c0s,B,T,H,D,A,vfCoef,entCoef,clipEps,gOut,outHostOrNull);
   return            lstm_bptt_dev_R<double>(pp,obsB,actA,advA,retA,oldA,termA,h0s,c0s,B,T,H,D,A,vfCoef,entCoef,clipEps,gOut,outHostOrNull);
+}
+
+/* ================= NATIVE DEVICE-RESIDENT LSTM ROLLOUT DRIVER ================================
+   The recurrent twin of lean_cuda_plugin_rollout (MLP) — mirrors the MinGRU native rollout's design
+   (device-resident recurrent state threaded across steps + reset on terminals, on-device forward +
+   sample, threaded CPU env-step, column scatter) but keeps LSTM's TWO states (h,c) and reuses the LSTM
+   kernels the BPTT already ships (k_lstm_gate_fwd / k_lstm_reset / k_lstm_add_bias / lstm_gemm).
+
+   The whole T-horizon runs in ONE FFI call. Per step: obs H2D → Gin = obs·Wxᵀ, Grec = Hprev·Whᵀ
+   (cublasDgemm) → k_lstm_gate_fwd (i/f/g/o gates, new h,c) → logits = h·Woᵀ+bo → k_sample (the SAME
+   per-env splitmix64 stream as the CPU sampler, bit-exact actions/values) → threaded plugin env-step →
+   TIME-MAJOR SoA scatter (row = s·N+e). (h,c) live device-resident; at the start of step s>0 (and once
+   after the loop) k_lstm_reset zeros the rows whose previous step terminated. This kills the host
+   Array(Array Transition) build + the host SoA transpose the old Lean rollout paid.
+
+   Forward math is VERBATIM lean_ffi_lstm_fwd_step_batch_blas (the CPU BLAS forward the old rollout
+   called per step); cublasDgemm's reduction order differs from cblas ⇒ ~1e-11 vs that forward (the same
+   tolerance the GPU BPTT already accepts, verify-lstm-blas), and k_sample is the bit-exact device twin
+   of lean_ffi_sample_actions_batch. RNG is identical to the old loop (base rolloutRng + s·N·G, env n
+   draws +(n+1)·G) so the caller advances its rng by N·T·G. Output (doubles), row = s·N+e (TIME-MAJOR):
+     obs(T·N·D); act(T·N); logp(T·N); val(T·N); rew(T·N); term(T·N);
+     bootV(N); finalObs(N·D); finalH(N·H); finalC(N·H)
+   finalObs threads the persistent env state, finalH/finalC the persistent (h,c), to the next update. ==*/
+
+/* bootV[n] = Y[n·O + A] (the value head of the bootstrap logits). */
+__global__ void k_lstm_extract_val(const double* Y, double* out, int N, int O, int A){
+  int n=blockIdx.x*blockDim.x+threadIdx.x; if(n>=N) return; out[n]=Y[(long)n*O+A];
+}
+
+/* Dedicated env-step + TIME-MAJOR scatter pool — a self-contained twin of rollpool_t/rp_worker kept
+   separate so the shared g_rp (MLP/MinGRU, env-MAJOR scatter) stays byte-for-byte untouched. */
+typedef struct {
+  Handle* eh;
+  const double *hSamp, *cur, *actRM; double *nxt, *hRT;   /* hSamp=[act(N);logp(N);val(N)] whole batch */
+  double *obsCol,*actCol,*logpCol,*valCol,*rewCol,*termCol;   /* TIME-MAJOR (row = s·N+e) */
+  long N, D, T; int nAgents; size_t s;
+  int nthreads, alive; pthread_barrier_t bar;
+} lrollpool_t;
+static lrollpool_t g_lrp; static pthread_t g_lrp_th[64]; static int g_lrp_init=0;
+static void lrp_run(lrollpool_t* p, int tid){
+  int nt=p->nthreads, A=p->nAgents; long D=p->D, N=p->N; size_t s=p->s;
+  int span=p->eh->N;                                  /* number of envs (rows = envs·nAgents) */
+  int eLo=(int)((long)tid*span/nt), eHi=(int)((long)(tid+1)*span/nt);
+  if(eLo>=eHi) return;
+  p->eh->step_range(p->eh->env, p->actRM, p->nxt, p->hRT, p->hRT+N, eLo, eHi-eLo);
+  for(long e=(long)eLo*A; e<(long)eHi*A; e++){ long row=(long)s*N+e;
+    for(long j=0;j<D;j++) p->obsCol[row*D+j]=p->cur[e*D+j];      /* obs BEFORE the step */
+    p->actCol[row]=p->hSamp[e]; p->logpCol[row]=p->hSamp[N+e]; p->valCol[row]=p->hSamp[2*N+e];
+    p->rewCol[row]=p->hRT[e];   p->termCol[row]=p->hRT[N+e]; }
+}
+static void* lrp_worker(void* arg){
+  long tid=(long)arg;
+  for(;;){ pthread_barrier_wait(&g_lrp.bar); if(!g_lrp.alive) return NULL; lrp_run(&g_lrp,(int)tid); pthread_barrier_wait(&g_lrp.bar); }
+}
+
+/* persistent device-buffer cache (shapes constant across a run ⇒ allocate once, grow, never shrink). */
+static void* g_lroll_buf[20]; static size_t g_lroll_sz[20];
+static void* lroll_slot(int i, size_t bytes){
+  if(g_lroll_sz[i]<bytes){ if(g_lroll_buf[i]) cudaFree(g_lroll_buf[i]);
+    if(cudaMalloc(&g_lroll_buf[i],bytes)!=cudaSuccess){ g_lroll_buf[i]=NULL; g_lroll_sz[i]=0; return NULL; }
+    g_lroll_sz[i]=bytes; }
+  return g_lroll_buf[i]; }
+
+extern "C" LEAN_EXPORT lean_obj_res lean_cuda_plugin_rollout_lstm(
+    size_t hh, lean_obj_arg paramsA, lean_obj_arg obs0a, lean_obj_arg h0a, lean_obj_arg c0a,
+    size_t N, size_t D, size_t H, size_t A, size_t T, uint64_t rolloutRng, lean_obj_arg w){
+  (void)w;
+  Handle* eh=(Handle*)hh;
+  const uint64_t G=0x9E3779B97F4A7C15ULL;
+  size_t O=A+1, H4=4*H;
+  const double* pp=lean_float_array_cptr(paramsA);
+  const double* obs0=lean_float_array_cptr(obs0a);
+  const double* h0=lean_float_array_cptr(h0a); const double* c0=lean_float_array_cptr(c0a);
+  long NT=(long)N*(long)T;
+  long cols = NT*(long)D + 5*NT + (long)N + (long)N*(long)D + 2*(long)N*(long)H;
+  lean_object* Oo=lean_alloc_sarray(sizeof(double),cols,cols); double* out=lean_float_array_cptr(Oo);
+  double *obsCol=out, *actCol=obsCol+NT*(long)D, *logpCol=actCol+NT, *valCol=logpCol+NT, *rewCol=valCol+NT, *termCol=rewCol+NT;
+  double *bootV=termCol+NT, *finalObs=bootV+(long)N, *finalH=finalObs+(long)N*(long)D, *finalC=finalH+(long)N*(long)H;
+
+  cublasHandle_t hbl=cu_handle();
+  #define LR(i,n) (double*)lroll_slot((i),(size_t)(n)*8)
+  double *dWx=LR(0,H4*D), *dWh=LR(1,H4*H), *dbih=LR(2,H4), *dWo=LR(3,O*H), *dbo=LR(4,O);
+  double *dObs=LR(5,(size_t)N*D), *dGin=LR(6,(size_t)N*H4), *dGrec=LR(7,(size_t)N*H4);
+  double *dHst=LR(8,(size_t)N*H), *dCst=LR(9,(size_t)N*H), *dY=LR(10,(size_t)N*O), *dO=LR(11,3*(size_t)N), *dTermCur=LR(12,(size_t)N);
+  double *dHst2=LR(13,(size_t)N*H), *dCst2=LR(14,(size_t)N*H), *dscr=LR(15,8*(size_t)N*H);
+  #undef LR
+  double *dII=dscr, *dFF=dscr+(size_t)N*H, *dGG=dscr+2*(size_t)N*H, *dOO=dscr+3*(size_t)N*H,
+         *dTC=dscr+4*(size_t)N*H, *dHT=dscr+5*(size_t)N*H, *dHP=dscr+6*(size_t)N*H, *dCP=dscr+7*(size_t)N*H;
+  double *hSamp=(double*)malloc(8*3*(size_t)N), *hA=(double*)malloc(8*(size_t)N*D),
+         *hB=(double*)malloc(8*(size_t)N*D), *hRT=(double*)malloc(8*2*(size_t)N);
+  int ok=(N>0 && hbl && eh && dWx&&dWh&&dbih&&dWo&&dbo&&dObs&&dGin&&dGrec&&dHst&&dCst&&dY&&dO&&dTermCur
+          &&dHst2&&dCst2&&dscr&&hSamp&&hA&&hB&&hRT);
+  if(ok){
+    cublasSetStream(hbl,0); int B=256;
+    #define GD(x) ceildiv((long)(x),B)
+    cudaMemcpy(dWx, pp,                     8*H4*D, cudaMemcpyHostToDevice);
+    cudaMemcpy(dWh, pp+H4*D,                8*H4*H, cudaMemcpyHostToDevice);
+    cudaMemcpy(dbih,pp+H4*D+H4*H,           8*H4,   cudaMemcpyHostToDevice);
+    cudaMemcpy(dWo, pp+H4*D+H4*H+H4,        8*O*H,  cudaMemcpyHostToDevice);
+    cudaMemcpy(dbo, pp+H4*D+H4*H+H4+O*H,    8*O,    cudaMemcpyHostToDevice);
+    cudaMemcpy(dHst,h0,8*(size_t)N*H,cudaMemcpyHostToDevice);
+    cudaMemcpy(dCst,c0,8*(size_t)N*H,cudaMemcpyHostToDevice);
+    int threaded=(eh->step_range!=NULL);
+    int nAg=eh->numAgents>0?eh->numAgents:1;
+    if(threaded && !g_lrp_init){
+      g_lrp.nthreads=rp_threads(); g_lrp.alive=1;
+      pthread_barrier_init(&g_lrp.bar,NULL,g_lrp.nthreads+1);
+      for(long t=0;t<g_lrp.nthreads;t++) pthread_create(&g_lrp_th[t],NULL,lrp_worker,(void*)t);
+      g_lrp_init=1;
+    }
+    if(threaded){
+      g_lrp.eh=eh; g_lrp.obsCol=obsCol; g_lrp.actCol=actCol; g_lrp.logpCol=logpCol; g_lrp.valCol=valCol;
+      g_lrp.rewCol=rewCol; g_lrp.termCol=termCol; g_lrp.N=(long)N; g_lrp.D=(long)D; g_lrp.T=(long)T; g_lrp.nAgents=nAg;
+    }
+    double* dObsTraj=lstm_obs_traj((size_t)N*T*D); g_dLstmObs_valid=0;   /* device-resident obs (BPTT reads it) */
+    const double* cur=obs0; double* nxt=hA;
+    for(size_t s=0;s<T;s++){
+      cudaMemcpy(dObs,cur,8*(size_t)N*D,cudaMemcpyHostToDevice);
+      if(dObsTraj) cudaMemcpy(dObsTraj+(long)s*N*D, dObs, 8*(size_t)N*D, cudaMemcpyDeviceToDevice);   /* stamp step s */
+      if(s>0) k_lstm_reset<double><<<GD((long)N*H),B>>>(dHst,dCst,dTermCur,(int)N,(int)H,1);   /* reset from term[s-1] */
+      lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)N,(int)H4,(int)D, dObs,(int)D, dWx,(int)D, 0.0, dGin,(int)H4);
+      lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)N,(int)H4,(int)H, dHst,(int)H, dWh,(int)H, 0.0, dGrec,(int)H4);
+      k_lstm_gate_fwd<double><<<GD((long)N*H),B>>>(dGin,dGrec,dbih, dHst,dCst, dII,dFF,dGG,dOO,dTC,dHT,dHP,dCP,(int)N,(int)H);
+      lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)N,(int)O,(int)H, dHst,(int)H, dWo,(int)H, 0.0, dY,(int)O);   /* logits from new h */
+      k_lstm_add_bias<double><<<GD((long)N*O),B>>>(dY,dbo,(long)N,(int)O);
+      k_sample<<<GD((long)N),B>>>(dY,dO,(int)N,(int)A,(int)O,(unsigned long long)(rolloutRng+(uint64_t)(s*N)*G));
+      cudaDeviceSynchronize();
+      cudaMemcpy(hSamp,dO,8*3*(size_t)N,cudaMemcpyDeviceToHost);
+      g_lrp.s=s; g_lrp.cur=cur; g_lrp.nxt=nxt; g_lrp.hSamp=hSamp; g_lrp.actRM=hSamp; g_lrp.hRT=hRT;
+      if(threaded){ pthread_barrier_wait(&g_lrp.bar); pthread_barrier_wait(&g_lrp.bar); }
+      else {
+        eh->step(eh->env, hSamp, nxt, hRT, hRT+N);
+        for(size_t e=0;e<N;e++){ long row=(long)s*(long)N+(long)e;
+          for(size_t j=0;j<D;j++) obsCol[row*(long)D+j]=cur[e*D+j];
+          actCol[row]=hSamp[e]; logpCol[row]=hSamp[N+e]; valCol[row]=hSamp[2*N+e];
+          rewCol[row]=hRT[e]; termCol[row]=hRT[N+e]; }
+      }
+      cudaMemcpy(dTermCur,hRT+N,8*(size_t)N,cudaMemcpyHostToDevice);   /* term[s] → device for the next reset */
+      cur=nxt; nxt=(nxt==hA)?hB:hA;
+    }
+    if(T>0) k_lstm_reset<double><<<GD((long)N*H),B>>>(dHst,dCst,dTermCur,(int)N,(int)H,1);   /* final reset from term[T-1] */
+    cudaMemcpy(finalH,dHst,8*(size_t)N*H,cudaMemcpyDeviceToHost);
+    cudaMemcpy(finalC,dCst,8*(size_t)N*H,cudaMemcpyDeviceToHost);
+    for(size_t i=0;i<N*D;i++) finalObs[i]=cur[i];                     /* persistent env obs → next update */
+    /* bootstrap value = forward(finalObs, finalH, finalC), computed into TEMP state so finalH/finalC stand */
+    cudaMemcpy(dObs,cur,8*(size_t)N*D,cudaMemcpyHostToDevice);
+    cudaMemcpy(dHst2,dHst,8*(size_t)N*H,cudaMemcpyDeviceToDevice);
+    cudaMemcpy(dCst2,dCst,8*(size_t)N*H,cudaMemcpyDeviceToDevice);
+    lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)N,(int)H4,(int)D, dObs,(int)D, dWx,(int)D, 0.0, dGin,(int)H4);
+    lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)N,(int)H4,(int)H, dHst2,(int)H, dWh,(int)H, 0.0, dGrec,(int)H4);
+    k_lstm_gate_fwd<double><<<GD((long)N*H),B>>>(dGin,dGrec,dbih, dHst2,dCst2, dII,dFF,dGG,dOO,dTC,dHT,dHP,dCP,(int)N,(int)H);
+    lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)N,(int)O,(int)H, dHst2,(int)H, dWo,(int)H, 0.0, dY,(int)O);
+    k_lstm_add_bias<double><<<GD((long)N*O),B>>>(dY,dbo,(long)N,(int)O);
+    k_lstm_extract_val<<<GD((long)N),B>>>(dY,dO,(int)N,(int)O,(int)A);
+    cudaDeviceSynchronize();
+    cudaMemcpy(bootV,dO,8*(size_t)N,cudaMemcpyDeviceToHost);
+    if(dObsTraj){ g_dLstmObs_valid=1; g_dLstmObs_B=(long)N; g_dLstmObs_T=(long)T; g_dLstmObs_D=(long)D; }   /* BPTT may skip obs H2D */
+    #undef GD
+  } else for(long i=0;i<cols;i++) out[i]=0.0;
+  free(hSamp); free(hA); free(hB); free(hRT);
+  lean_dec(paramsA); lean_dec(obs0a); lean_dec(h0a); lean_dec(c0a);
+  return lean_io_result_mk_ok(Oo);
 }
 

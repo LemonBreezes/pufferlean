@@ -1321,7 +1321,8 @@ def trainPluginEnvRec (name config : String)
   -- against the f64-BLAS kernels by `verify-lstm-fwd-f32`/`verify-lstm-grad-f32` (~1e-6 relative).
   -- Default OFF, matching this project's convention of landing a new precision tier opt-in first.
   let useF32 := (← IO.getEnv "PUFFER_LSTM_F32").getD "0" != "0"
-  let fwdStep := if useF32 then Puffer.Float.BLAS.lstmFwdStepBatchBlasF32FFI else Puffer.Float.BLAS.lstmFwdStepBatchBlasFFI
+  -- BPTT precision tier (the native rollout forward is always f64 device-BLAS; the f32 tier only
+  -- reprecisions the BPTT gradient, an independent computation from the rollout forward).
   let gradStep := if useF32 then Puffer.Float.BLAS.lstmPPOGradBatchBlasF32FFI else Puffer.Float.BLAS.lstmPPOGradBatchBlasFFI
   let h ← Puffer.Plugin.envOpen name (u numEnvs) seed config
   if h == 0 then IO.println s!"puffer train: env '{name}' not found — run ocean/build.sh {name}"; return
@@ -1358,68 +1359,34 @@ def trainPluginEnvRec (name config : String)
     let lrNow := cosineLr lr minLrRatio upd updates
     let initHsF := hsF; let initCsF := csF
     let params := flattenRec p
-    let mut trajs : Array (Array Transition) := Array.replicate N #[]
     let r0 ← IO.monoNanosNow
-    for _s in [0:T] do
-      -- batched native forward (replaces the per-env `lstmCellF` Lean glue) + batched native sampler
-      let fwdOut := fwdStep params obs hsF csF (u N) (u D) (u H) (u A)
-      let hN := Puffer.Float.FFI.sliceFFI fwdOut (u 0) (u (N*H))
-      let cN := Puffer.Float.FFI.sliceFFI fwdOut (u (N*H)) (u (N*H))
-      let Yb := Puffer.Float.FFI.sliceFFI fwdOut (u (2*N*H)) (u (N*O))
-      let avl := Puffer.Float.FFI.sampleActionsBatchFFI Yb (u N) (u A) (u O) rng
-      rng := rng + (UInt64.ofNat N) * G
-      hsF := hN; csF := cN
-      let mut actArr : Array Float := Array.replicate N 0.0
-      for n in [0:N] do
-        let xn := (Array.range D).map (fun j => obs[n*D + j]!)
-        let a := (avl[n]!).toUInt64.toNat
-        trajs := trajs.set! n ((trajs[n]!).push
-          { obs := xn, action := a, reward := 0.0, value := avl[2*N+n]!, oldLogp := avl[N+n]!, terminal := false })
-        actArr := actArr.set! n (Float.ofNat a)
-      let out ← Puffer.Plugin.envStep h (mk actArr)
-      for n in [0:N] do
-        let r := out[N*D + n]!
-        let term := out[N*D + N + n]! > 0.5
-        let tr := trajs[n]!; let li := tr.size - 1
-        trajs := trajs.set! n (tr.set! li { (tr[li]!) with reward := r, terminal := term })
-        if term then
-          for j in [0:H] do hsF := hsF.set! (n*H+j) 0.0; csF := csF.set! (n*H+j) 0.0
-      obs := Puffer.Float.FFI.sliceFFI out (u 0) (u (N*D))
-    -- bootstrap value per env from the current obs + carried hidden state (same batched forward)
-    let fwdOutB := fwdStep params obs hsF csF (u N) (u D) (u H) (u A)
-    let YbB := Puffer.Float.FFI.sliceFFI fwdOutB (u (2*N*H)) (u (N*O))
-    let bootVals := (Array.range N).map (fun n => YbB[n*O + A]!)
-    let segAdvRet := (Array.range N).map (fun n => computeGAEBoot trajs[n]! bootVals[n]! gamma lam)
-    let allAdv := segAdvRet.foldl (fun acc ar => acc ++ ar.1) (#[] : Array Float)
-    let nAdv := Float.ofNat (max allAdv.size 1)
-    let mean := allAdv.foldl (·+·) 0.0 / nAdv
-    let var := allAdv.foldl (fun s x => s + (x-mean)*(x-mean)) 0.0 / nAdv
-    let std := Float.sqrt var
-    let tm0 ← IO.monoNanosNow
-    -- transpose the env-major rollout into the time-major SoA layout `lstmPPOGradBatchBlasFFI` wants
-    -- (`arr[t*N+n]`, obs `arr[(t*N+n)*D+d]`) -- ONCE per update, reused by every epoch below (only `p`
-    -- changes per epoch, not the collected rollout data).
-    let mut obsTM : Array Float := Array.replicate (T*N*D) 0.0
-    let mut actTM : Array Float := Array.replicate (T*N) 0.0
-    let mut advTM : Array Float := Array.replicate (T*N) 0.0
-    let mut retTM : Array Float := Array.replicate (T*N) 0.0
-    let mut oldTM : Array Float := Array.replicate (T*N) 0.0
-    let mut termTM : Array Float := Array.replicate (T*N) 0.0
-    for n in [0:N] do
-      let traj := trajs[n]!
-      let (adv, ret) := segAdvRet[n]!
-      for t in [0:T] do
-        let tr := traj[t]!
-        let tmIdx := t*N + n
-        for d in [0:D] do obsTM := obsTM.set! (tmIdx*D+d) (tr.obs[d]!)
-        actTM := actTM.set! tmIdx (Float.ofNat tr.action)
-        advTM := advTM.set! tmIdx ((adv[t]! - mean) / (std + 1.0e-8))
-        retTM := retTM.set! tmIdx (ret[t]!)
-        oldTM := oldTM.set! tmIdx tr.oldLogp
-        termTM := termTM.set! tmIdx (if tr.terminal then 1.0 else 0.0)
-    let obsB := mk obsTM; let actB := mk actTM; let advB := mk advTM
-    let retB := mk retTM; let oldB := mk oldTM; let termB := mk termTM
-    let r1 ← IO.monoNanosNow; rollNs := rollNs + (r1 - r0); tmNs := tmNs + (r1 - tm0)
+    -- NATIVE device-resident LSTM rollout: (h,c) threaded + reset on-device, forward+sample on the GPU,
+    -- plugin env-step threaded in C, experience columns scattered TIME-MAJOR — replaces the host
+    -- `Array (Array Transition)` build + the host SoA transpose. RNG stream is identical to the old loop
+    -- (`rolloutRng + s·N·G`), so `rng` advances by exactly `N·T·G` (the T·N draws the rollout consumed).
+    let roll ← Puffer.Float.CUDA.cudaPluginRolloutLstmFFI h params obs hsF csF (u N) (u D) (u H) (u A) (u T) rng
+    rng := rng + (UInt64.ofNat (N*T)) * G
+    let rMid ← IO.monoNanosNow
+    let NT := N*T
+    let obsB   := Puffer.Float.FFI.sliceFFI roll (u 0) (u (NT*D))
+    let actB   := Puffer.Float.FFI.sliceFFI roll (u (NT*D)) (u NT)
+    let logpB  := Puffer.Float.FFI.sliceFFI roll (u (NT*D + NT)) (u NT)
+    let valCol := Puffer.Float.FFI.sliceFFI roll (u (NT*D + 2*NT)) (u NT)
+    let rewCol := Puffer.Float.FFI.sliceFFI roll (u (NT*D + 3*NT)) (u NT)
+    let termB  := Puffer.Float.FFI.sliceFFI roll (u (NT*D + 4*NT)) (u NT)
+    let bootV  := Puffer.Float.FFI.sliceFFI roll (u (NT*D + 5*NT)) (u N)
+    obs := Puffer.Float.FFI.sliceFFI roll (u (NT*D + 5*NT + N)) (u (N*D))
+    hsF := Puffer.Float.FFI.sliceFFI roll (u (NT*D + 5*NT + N + N*D)) (u (N*H))
+    csF := Puffer.Float.FFI.sliceFFI roll (u (NT*D + 5*NT + N + N*D + N*H)) (u (N*H))
+    -- per-segment GAE (backward) from the time-major columns + bootstrap — the identical recurrence to
+    -- `computeGAEBoot` — then batch-normalize advantages over the whole N·T (unchanged semantics), all in
+    -- native C (`lstmGaeBootNormFFI`). The O(N·T·D) obs handling already lives in C, and this retires the
+    -- last per-element-boxed host loop, so no host SoA-transpose / boxed GAE scan remains.
+    let advret := Puffer.Float.FFI.lstmGaeBootNormFFI valCol rewCol termB bootV (u N) (u T) gamma lam
+    let advB := Puffer.Float.FFI.sliceFFI advret (u 0) (u NT)
+    let retB := Puffer.Float.FFI.sliceFFI advret (u NT) (u NT)
+    let oldB := logpB
+    let r1 ← IO.monoNanosNow; rollNs := rollNs + (rMid - r0); tmNs := tmNs + (r1 - rMid)
     -- one batch-summed BPTT gradient (all N sequences, multi-threaded BLAS GEMMs) per epoch, then one
     -- mean-scaled grad-norm-clipped ascent step -- same clip/scale FORM as `applyRecGrad` (now meaned
     -- over the whole N·T batch, not per-sequence), but no longer bit-identical to the old N-sequential-
@@ -1458,16 +1425,17 @@ def trainPluginEnvRec (name config : String)
       let mut epRet := 0.0; let mut nEps := 0
       for n in [0:N] do
         let mut run := 0.0
-        for tr in trajs[n]! do
-          run := run + tr.reward
-          if tr.terminal then epRet := epRet + run; nEps := nEps + 1; run := 0.0
+        for s in [0:T] do
+          let row := s*N + n                       -- time-major rollout columns (row = s·N+n)
+          run := run + rewCol[row]!
+          if termB[row]! > 0.5 then epRet := epRet + run; nEps := nEps + 1; run := 0.0
       let m := if nEps == 0 then 0.0 else epRet / Float.ofNat nEps
       IO.println s!"  update {upd+1}: {nEps} eps, mean ep return = {m}{fmtEnvLog lastLog}"
       (← IO.getStdout).flush
   Puffer.Plugin.envClose h
   let envSteps := updates * N * T
   let sps := if updNs == 0 then 0 else envSteps * 1000000000 / updNs
-  IO.println s!"done. perf: {envSteps} env-steps ⇒ {sps} SPS   [rollout {rollNs/1000000}ms (of which SoA-transpose {tmNs/1000000}ms), BPTT {bpttNs/1000000}ms]"
+  IO.println s!"done. perf: {envSteps} env-steps ⇒ {sps} SPS   [native-rollout {rollNs/1000000}ms, GAE-prep {tmNs/1000000}ms, BPTT {bpttNs/1000000}ms]"
 
 /-! ### Gaussian (continuous) head — native gradient trainer -/
 
