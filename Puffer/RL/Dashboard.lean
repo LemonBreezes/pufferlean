@@ -16,6 +16,7 @@ This renderer is OPT-IN: without `--log` the trainers keep their ad-hoc per-upda
 byte-for-byte (tooling parses them). See `Puffer/RL/MinGRUTrain.lean` for the wiring.
 -/
 import Puffer.RL.Wandb
+import Puffer.RL.SelfLog
 
 namespace Puffer.RL.Dashboard
 
@@ -254,38 +255,38 @@ def ramGb : IO Float := do
     emit invalid JSON to the wandb daemon. -/
 @[inline] def jsonF (x : Float) : String := if x == x && x.abs < 1.0e308 then toString x else "0"
 
-/-- Serialize the completed dashboard dict into PufferLib's EXACT native `_C` metric keys (src/bindings.cu
-    `puf_log`), for the wandb daemon. Top-level `SPS`/`agent_steps`/`uptime`/`epoch`; `loss/*` (policy,
-    value,entropy,total,old_kl,kl,clipfrac); `perf/*`; `util/*` (`gpu_mem` = 100·used/total); and the env's
-    own PufferLib Log under `env/*`. Same dict, same tick as the on-screen dashboard — as in `pufferl.py`
-    where `print_dashboard` and `wandb.log` consume one `flat_logs`. (`env/n` is omitted: excluded upstream
-    from `userStats`.) -/
-def nativeRow (d : DashInput) : String := Id.run do
-  let kv := fun (k v : String) => "\"" ++ k ++ "\":" ++ v
-  let mut p : Array String := #[
-    kv "SPS" (jsonF d.sps), kv "agent_steps" (toString d.steps),
-    kv "uptime" (jsonF d.uptime), kv "epoch" (toString d.epoch)]
-  for l in d.losses do p := p.push (kv ("loss/" ++ l.1) (jsonF l.2))
-  p := p ++ #[
-    kv "perf/rollout" (jsonF d.rollout), kv "perf/train" (jsonF d.train),
-    kv "perf/eval_gpu" (jsonF d.evalGpu), kv "perf/eval_env" (jsonF d.evalEnv),
-    kv "perf/train_misc" (jsonF d.trainMisc), kv "perf/train_forward" (jsonF d.trainForward),
-    kv "util/gpu_percent" (jsonF d.gpuPct),
-    kv "util/gpu_mem" (jsonF (if d.vramTotal > 0.0 then 100.0 * d.vramUsed / d.vramTotal else 0.0)),
-    kv "util/vram_used_gb" (jsonF d.vramUsed), kv "util/vram_total_gb" (jsonF d.vramTotal),
-    kv "util/cpu_mem_gb" (jsonF d.ramGb)]
-  for s in d.userStats do p := p.push (kv ("env/" ++ s.1) (jsonF s.2))
-  return "{" ++ String.intercalate "," p.toList ++ "}"
+/-- The completed dashboard dict as PufferLib's EXACT native `_C` key→value pairs (src/bindings.cu
+    `puf_log`), in a stable order: `SPS`/`agent_steps`/`uptime`/`epoch`; `loss/*` (policy,value,entropy,
+    total,old_kl,kl,clipfrac); `perf/*`; `util/*` (`gpu_mem` = 100·used/total); the env's own PufferLib
+    Log under `env/*`. One dict, consumed by BOTH the wandb daemon and the self-log — as in `pufferl.py`
+    where `print_dashboard`/`wandb.log`/the `logs/*.json` dump all read one `flat_logs`. (`env/n` is
+    omitted: excluded upstream from `userStats`.) -/
+def nativePairs (d : DashInput) : Array (String × Float) :=
+  #[("SPS", d.sps), ("agent_steps", Float.ofNat d.steps), ("uptime", d.uptime), ("epoch", Float.ofNat d.epoch)]
+  ++ d.losses.map (fun l => ("loss/" ++ l.1, l.2))
+  ++ #[("perf/rollout", d.rollout), ("perf/train", d.train), ("perf/eval_gpu", d.evalGpu),
+       ("perf/eval_env", d.evalEnv), ("perf/train_misc", d.trainMisc), ("perf/train_forward", d.trainForward),
+       ("util/gpu_percent", d.gpuPct),
+       ("util/gpu_mem", if d.vramTotal > 0.0 then 100.0 * d.vramUsed / d.vramTotal else 0.0),
+       ("util/vram_used_gb", d.vramUsed), ("util/vram_total_gb", d.vramTotal), ("util/cpu_mem_gb", d.ramGb)]
+  ++ d.userStats.map (fun s => ("env/" ++ s.1, s.2))
+
+/-- Serialize native pairs to a JSON object for the wandb daemon. -/
+def pairsToJson (pairs : Array (String × Float)) : String :=
+  "{" ++ String.intercalate "," (pairs.toList.map (fun kv => "\"" ++ kv.1 ++ "\":" ++ jsonF kv.2)) ++ "}"
 
 /-- Query GPU (NVML, microseconds) + RAM, render, and redraw in place (cursor-home, matching PufferLib).
-    Emits the same dict to the live wandb daemon (`Wandb.emitRow`, a no-op unless `--wandb` started one). -/
+    Feeds the SAME dict to the live wandb daemon (`Wandb.emitRow`) and the per-run self-log
+    (`SelfLog.record`) — both no-ops unless active/needed. -/
 def redraw (d : DashInput) : IO Unit := do
   let (gpu, vu, vt) ← gpuStats
   let ram ← ramGb
   let d := { d with gpuPct := gpu, vramUsed := vu, vramTotal := vt, ramGb := ram }
   IO.print ("\x1b[0;0H" ++ render d ++ "\n")
   (← IO.getStdout).flush
-  Puffer.RL.Wandb.emitRow (nativeRow d)
+  let pairs := nativePairs d
+  Puffer.RL.Wandb.emitRow (pairsToJson pairs)
+  Puffer.RL.SelfLog.record pairs
 
 /-- Assemble a `DashInput` from the trainers' raw scalars and redraw. Shared by both MinGRU
     trainers. `lossArr` is `cudaMgReadLossesFFI`'s 7-element return; the per-phase seconds are

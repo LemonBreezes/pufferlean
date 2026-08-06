@@ -23,3 +23,6 @@ envs/**/libenv_*.so
 # boxoban's puzzle bank: ~120MB (basic, generated) / ~180MB (medium, downloaded) of CACHE that
 # ocean/boxoban/adapter.c regenerates on first use, exactly as PufferLib's binding does.
 resources/boxoban/
+
+# Per-run self-logs (PufferLib logs/<env>/<run_id>.json; feeds constellation)
+/logs/

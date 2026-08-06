@@ -31,6 +31,7 @@ import Puffer.Float.CUDA
 import Puffer.RL.FFITrain
 import Puffer.RL.MinGRUTrain
 import Puffer.RL.Wandb
+import Puffer.RL.SelfLog
 import Puffer.Plugin
 import Puffer.Check.Core
 import Puffer.Check.Parse
@@ -2237,11 +2238,17 @@ def main (args : List String) : IO Unit := do
         -- hatch (env var, so the commandline surface still matches PufferLib) that our verification
         -- tooling (tools/env_sweep.sh, tools/compare.py) sets to get the machine-parseable lines.
         let plainLog := (← IO.getEnv "PUFFER_PLAIN_LOG").isSome
+        Puffer.RL.SelfLog.reset            -- fresh per-run metric history for the logs/<env>/<id>.json dump
+        -- `flags` is the layered `cli ++ perEnv ++ default` list with DUPLICATE keys (config lookups use
+        -- first-wins via `find?`); resolve it to a first-wins (CLI-wins) dict — PufferLib's `{**args}` —
+        -- so the wandb `config=` and self-log dump carry the effective values, not the ini defaults.
+        let cfgResolved : List (String × String) :=
+          flags.foldl (fun acc kv => if acc.any (·.1 == kv.1) then acc else acc ++ [kv]) []
         -- wandb (PufferLib `--wandb`): spawn the live tracker daemon BEFORE training so the shared
         -- dashboard `redraw` streams it the same metric dict each 0.6s tick. `config=` the resolved
         -- flag map, as PufferLib passes `config=args` to `wandb.init`.
         if cfg.wandb then
-          let cfgJson := "{" ++ String.intercalate "," (flags.map (fun kv =>
+          let cfgJson := "{" ++ String.intercalate "," (cfgResolved.map (fun kv =>
             "\"" ++ Puffer.RL.Wandb.escJson kv.1 ++ "\":\"" ++ Puffer.RL.Wandb.escJson kv.2 ++ "\"")) ++ "}"
           Puffer.RL.Wandb.start cfg.wandbProject cfg.wandbGroup cfg.wandbTag cfgJson
         -- trainer derives updates from total_timesteps / (batch·horizon) once it knows num_agents.
@@ -2308,6 +2315,9 @@ def main (args : List String) : IO Unit := do
         -- (PufferLib's end-of-_train behavior). No checkpoint written ⇒ nothing to upload, just finish.
         if cfg.wandb then
           Puffer.RL.Wandb.finish (← runFinalCheckpoint env cfg.seed)
+        -- self-log (PufferLib writes logs/<env>/<run_id>.json every run: config + downsampled metric
+        -- history — the data its `constellation` galaxy reads). No-op if no dashboard ticks were recorded.
+        Puffer.RL.SelfLog.write env cfgResolved ((g "downsample").elim 5 (fun s => parseNat s 5)) (toString (← IO.monoNanosNow))
   | "verify-mingru-grad" :: _ =>
       let (a, r) := Puffer.RL.NNTrain.mingruGradCheck
       IO.println s!"mingru-grad AD-vs-finite-diff:  max|Δ| = {a}   max relΔ = {r}"
