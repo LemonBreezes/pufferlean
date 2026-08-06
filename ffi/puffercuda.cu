@@ -336,6 +336,14 @@ extern "C" LEAN_EXPORT lean_obj_res lean_cuda_mg_prep(
 extern "C" LEAN_EXPORT lean_obj_res lean_cuda_mg_loss_enable(uint8_t on, lean_obj_arg w){
   (void)w; g_mgLossOn = on ? 1 : 0; return lean_io_result_mk_ok(lean_box(0));
 }
+/* LSTM BPTT input reuse across the epochs of one update. The trainer runs `epochs` BPTT-grad calls per
+   update with IDENTICAL rollout inputs (obs/act/adv/ret/old/term) — only the weights change. Setting
+   this to 1 for epochs>0 lets the grad SKIP re-uploading those (read-only, persistent device buffers)
+   H2D — bit-identical, just faster. h0/c0 + params still upload every epoch. Reset to 0 by ep==0. */
+int g_lstmReuseInputs=0;
+extern "C" LEAN_EXPORT lean_obj_res lean_cuda_lstm_reuse_inputs(uint8_t on, lean_obj_arg w){
+  (void)w; g_lstmReuseInputs = on ? 1 : 0; return lean_io_result_mk_ok(lean_box(0));
+}
 /* Copy the 7 most-recent dashboard losses out (policy,value,entropy,total,old_kl,kl,clipfrac). */
 extern "C" LEAN_EXPORT lean_obj_res lean_cuda_mg_read_losses(lean_obj_arg w){
   (void)w; lean_object* o=lean_alloc_sarray(sizeof(double),7,7);
@@ -6898,6 +6906,99 @@ __global__ void k_lstm_colsum(R* gb, const R* M, long rows, int J){
   if(tid==0) gb[j]=sh[0];
 }
 
+/* device f64→f32 cast (used by the f32 BPTT tier to re-precision the device-resident rollout obs in
+   place instead of a 7.7M-element HOST cast + 31MB H2D per epoch — bit-identical rounding). */
+__global__ void k_cast_d2f(const double* __restrict__ src, float* __restrict__ dst, long n){
+  long i=(long)blockIdx.x*blockDim.x+threadIdx.x; if(i<n) dst[i]=(float)src[i];
+}
+
+/* ================= FUSED PERSISTENT LSTM RECURRENCE (f32 tier) ============================
+   The T=64 recurrent scan is the BPTT wall: it is a strictly-sequential dependency chain whose
+   per-step tiny GEMM (Hprev·Whᵀ, H×H4) + gate kernel + reset kernel launches DON'T overlap, so it
+   is latency/launch bound (bf16 gave only +5% — not GEMM-throughput bound). These two kernels
+   collapse the ~128 per-step launches into 2 PERSISTENT launches (one forward, one backward): each
+   thread block owns ROWS batch-rows' (h,c) across the WHOLE T loop, keeps Wh in shared, and does the
+   H×H4 recurrent matvec in-kernel. The non-recurrent GEMMs (input projection Wx·X, output head Wo·h,
+   and every weight/bias-grad GEMM) stay cuBLAS — only the recurrence is fused. Reuses the SAME gate
+   math as k_lstm_gate_fwd/bwd so the f32 numerics match the GEMM-based recurrence to tolerance.
+   Layout: thread (r,j) with r=tid/H, j=tid%H owns batch-row b=blockIdx*ROWS+r, hidden unit j; each
+   thread computes the 4 gate-slice outputs {j,H+j,2H+j,3H+j} it needs, so registers are O(1) in H.
+   Wh is staged into shared with a padded row stride SW=H+1 to break the stride-H bank conflicts of
+   the forward matvec (thread j reads sWh[j*SW+k] ⇒ banks (j+k)%32 all distinct). Fused path is only
+   selected when 4·H·(H+1)·4 bytes fit the device's opt-in shared limit (H≈64 ⇒ ~66KB) — larger H
+   falls back to the per-step GEMM recurrence, so correctness is preserved for every shape. */
+template<typename R>
+__global__ void k_lstm_fwd_fused(const R* __restrict__ Gin, const R* __restrict__ Wh,
+    const R* __restrict__ bih, const double* __restrict__ term, const R* __restrict__ h0,
+    const R* __restrict__ c0, R* II, R* FF, R* GG, R* OO, R* TC, R* HT, R* HP, R* CP,
+    int B, int T, int H, int ROWS){
+  extern __shared__ __align__(16) char smem_f[];
+  int H4=4*H, SW=H+1;
+  R* sWh=(R*)smem_f;            /* H4 × SW (padded)              */
+  R* sh =sWh + (long)H4*SW;     /* ROWS × H  (current h state)   */
+  int tid=threadIdx.x, r=tid/H, j=tid%H, b=blockIdx.x*ROWS + r;
+  bool valid=(b<B);
+  for(int i=tid;i<H4*H;i+=blockDim.x){ int m=i/H, k=i%H; sWh[(long)m*SW+k]=Wh[i]; }
+  R c_reg = valid? c0[(long)b*H+j] : (R)0;
+  sh[r*H+j] = valid? h0[(long)b*H+j] : (R)0;
+  __syncthreads();
+  for(int t=0;t<T;t++){
+    if(t>0 && valid && term[(long)(t-1)*B+b]!=0.0){ sh[r*H+j]=(R)0; c_reg=(R)0; }
+    __syncthreads();                                   /* reset + prev-step h writes visible */
+    R* hrow=sh + r*H;
+    R a0=(R)0,a1=(R)0,a2=(R)0,a3=(R)0;
+    for(int k=0;k<H;k++){ R hv=hrow[k];
+      a0+=hv*sWh[(long)(     j)*SW+k]; a1+=hv*sWh[(long)(  H+j)*SW+k];
+      a2+=hv*sWh[(long)(2*H+j)*SW+k]; a3+=hv*sWh[(long)(3*H+j)*SW+k]; }
+    R oldH=hrow[j], oldC=c_reg;
+    __syncthreads();                                   /* all matvec reads done before we overwrite sh */
+    const R* Gt=Gin + (long)t*B*H4; long g0=(long)b*H4;
+    R gi=Gt[g0+j]+a0+bih[j], gf=Gt[g0+H+j]+a1+bih[H+j];
+    R gg=Gt[g0+2*H+j]+a2+bih[2*H+j], go=Gt[g0+3*H+j]+a3+bih[3*H+j];
+    R iv=l_sig(gi), fv=l_sig(gf), gv=l_tanh(gg), ov=l_sig(go);
+    R cv=fv*oldC+iv*gv, tcv=l_tanh(cv), hv=ov*tcv;
+    sh[r*H+j]=hv; c_reg=cv;
+    if(valid){ long o=((long)t*B+b)*H + j;
+      II[o]=iv; FF[o]=fv; GG[o]=gv; OO[o]=ov; TC[o]=tcv; HT[o]=hv; HP[o]=oldH; CP[o]=oldC; }
+  }
+}
+/* Mirror of the forward: one persistent kernel over t=T-1..0. Thread (r,j) carries dh/dc for its own
+   unit in registers; each step writes its 4 dG slices to shared, then the in-kernel matvec dG·Wh forms
+   dHprev (column j of Wh, stride SW). dG is also written to global (T·B·H4) for the batched dWx/dWh/
+   dbih GEMMs that follow. Same reductions/branches as k_lstm_gate_bwd + k_lstm_carry. */
+template<typename R>
+__global__ void k_lstm_bwd_fused(const R* II, const R* FF, const R* GG, const R* OO, const R* TC,
+    const R* CP, const R* dHfromOut, const R* __restrict__ Wh, const double* __restrict__ term,
+    R* dG, int B, int T, int H, int ROWS){
+  extern __shared__ __align__(16) char smem_b[];
+  int H4=4*H, SW=H+1;
+  R* sWh=(R*)smem_b;             /* H4 × SW (padded)   */
+  R* sdG=sWh + (long)H4*SW;      /* ROWS × H4          */
+  int tid=threadIdx.x, r=tid/H, j=tid%H, b=blockIdx.x*ROWS + r;
+  bool valid=(b<B);
+  for(int i=tid;i<H4*H;i+=blockDim.x){ int m=i/H, k=i%H; sWh[(long)m*SW+k]=Wh[i]; }
+  __syncthreads();
+  R dHnext=(R)0, dCnext=(R)0; R* sdGrow=sdG + (long)r*H4;
+  for(int t=T;t-->0;){
+    long o=((long)t*B+b)*H + j;
+    R iv,fv,gv,ov,tcv,cprev,dh;
+    if(valid){ iv=II[o];fv=FF[o];gv=GG[o];ov=OO[o];tcv=TC[o];cprev=CP[o]; dh=dHfromOut[o]+dHnext; }
+    else { iv=fv=gv=ov=tcv=cprev=(R)0; dh=dHnext; }
+    R dc=dCnext+dh*ov*((R)1-tcv*tcv);
+    R do_=dh*tcv, df=dc*cprev, di=dc*gv, dg_=dc*iv, dCprev=dc*fv;
+    R dGi=di*iv*((R)1-iv), dGf=df*fv*((R)1-fv), dGg=dg_*((R)1-gv*gv), dGo=do_*ov*((R)1-ov);
+    sdGrow[j]=dGi; sdGrow[H+j]=dGf; sdGrow[2*H+j]=dGg; sdGrow[3*H+j]=dGo;
+    if(valid){ long g=((long)t*B+b)*H4; dG[g+j]=dGi; dG[g+H+j]=dGf; dG[g+2*H+j]=dGg; dG[g+3*H+j]=dGo; }
+    __syncthreads();                                   /* all 4 dG slices for the row written */
+    R dHprev=(R)0;
+    for(int m=0;m<H4;m++) dHprev+=sdGrow[m]*sWh[(long)m*SW+j];
+    int flow=(t>0 && valid && term[(long)(t-1)*B+b]==0.0);
+    dHnext = flow? dHprev : (R)0;
+    dCnext = flow? dCprev : (R)0;
+    __syncthreads();                                   /* matvec done before next step overwrites sdG */
+  }
+}
+
 /* row-major C[M×N] = opA(A)·opB(B) + beta·C via the col-major swap (pass B then A), f64 / f32 overloads
    (same identity as the MinGRU sgemm_rm). alpha is always 1. `bf` selects the bf16 TENSOR-CORE tier for
    the f32 overload: bf=0 is the exact cublasSgemm (f32 tier, unchanged); bf=1 rounds the operands to
@@ -6957,8 +7058,12 @@ static int lstm_bptt_dev_R(const double* pp, const double* obsBd, const double* 
   size_t O=A+1, H4=4*H;
   long TB=(long)T*(long)B; size_t BH=B*H, BH4=B*H4, sR=sizeof(R);
   #define LS(i,n) (R*)lstm_slot((i),(size_t)(n)*sR)
-  /* device-resident obs from the native rollout (f64 tier only): read it in place, skip the per-epoch H2D */
+  /* device-resident obs from the native rollout: the f64 tier reads it in place; the f32 tier can't
+     (bytes differ) but device-CASTS it to f32 (k_cast_d2f) instead of the HOST cast + 31MB H2D that
+     `lstm_up` would otherwise do every epoch — the single largest per-call BPTT cost measured. */
   int obsResident=(sR==8 && g_dLstmObs_valid && g_dLstmObs!=NULL
+                   && g_dLstmObs_B==(long)B && g_dLstmObs_T==(long)T && g_dLstmObs_D==(long)D);
+  int obsCastF32=(sR==4 && g_dLstmObs_valid && g_dLstmObs!=NULL
                    && g_dLstmObs_B==(long)B && g_dLstmObs_T==(long)T && g_dLstmObs_D==(long)D);
   R *dWx=LS(0,H4*D), *dWh=LS(1,H4*H), *dbih=LS(2,H4), *dWo=LS(3,O*H), *dbo=LS(4,O);
   R *dObs=obsResident? (R*)g_dLstmObs : LS(5,(size_t)TB*D), *dGin=LS(6,(size_t)TB*H4);
@@ -6977,16 +7082,50 @@ static int lstm_bptt_dev_R(const double* pp, const double* obsBd, const double* 
   { const double* pWx=pp; const double* pWh=pWx+H4*D; const double* pbih=pWh+H4*H;
     const double* pWo=pbih+H4; const double* pbo=pWo+O*H;
     lstm_up(dWx,pWx,H4*D); lstm_up(dWh,pWh,H4*H); lstm_up(dbih,pbih,H4); lstm_up(dWo,pWo,O*H); lstm_up(dbo,pbo,O);
-    if(!obsResident) lstm_up(dObs,obsBd,(size_t)TB*D);          /* resident ⇒ obs already on-device */
+    /* obs + act/adv/ret/old/term are CONSTANT across an update's epochs ⇒ reuse the persistent device
+       buffers on epochs>0 (g_lstmReuseInputs); h0/c0 + params always upload (params change; h0/c0 keeps
+       the non-fused GEMM path — which mutates dHst/dCst — correct). */
+    if(!g_lstmReuseInputs){
+      if(obsResident){ /* f64 in place */ }
+      else if(obsCastF32) k_cast_d2f<<<ceildiv((long)TB*D,256L),256>>>(g_dLstmObs,(float*)dObs,(long)TB*D);
+      else lstm_up(dObs,obsBd,(size_t)TB*D);
+    }
     lstm_up(dHst,h0sd,BH); lstm_up(dCst,c0sd,BH); }
-  cudaMemcpy(dAct,actAd,(size_t)TB*8,cudaMemcpyHostToDevice); cudaMemcpy(dAdv,advAd,(size_t)TB*8,cudaMemcpyHostToDevice);
-  cudaMemcpy(dRet,retAd,(size_t)TB*8,cudaMemcpyHostToDevice); cudaMemcpy(dOld,oldAd,(size_t)TB*8,cudaMemcpyHostToDevice);
-  cudaMemcpy(dTrm,termAd,(size_t)TB*8,cudaMemcpyHostToDevice);
+  if(!g_lstmReuseInputs){
+    cudaMemcpy(dAct,actAd,(size_t)TB*8,cudaMemcpyHostToDevice); cudaMemcpy(dAdv,advAd,(size_t)TB*8,cudaMemcpyHostToDevice);
+    cudaMemcpy(dRet,retAd,(size_t)TB*8,cudaMemcpyHostToDevice); cudaMemcpy(dOld,oldAd,(size_t)TB*8,cudaMemcpyHostToDevice);
+    cudaMemcpy(dTrm,termAd,(size_t)TB*8,cudaMemcpyHostToDevice);
+  }
+  /* FUSED PERSISTENT RECURRENCE eligibility (f32, non-bf16 only): pick ROWS batch-rows per block so
+     blockDim=ROWS·H≈256, stage Wh (padded H4×(H+1)) into shared. Selected only when the needed shared
+     bytes fit the device opt-in limit; otherwise fusedRows stays 0 and the per-step GEMM recurrence
+     below runs unchanged (so every shape — incl. large-H and the f64/bf16 tiers — stays correct). */
+  int fusedRows=0; size_t fwdSmem=0, bwdSmem=0;
+  if(sR==4 && bf==0 && H>0){
+    /* ROWS≈512/H (blockDim≈512 ⇒ 16 warps/block) measured best on H=64: enough warps to hide the
+       per-step sync/shared latency while still spreading ~B/ROWS blocks across most SMs. */
+    int SW=(int)H+1, rows=512/(int)H; if(rows<1) rows=1; if(rows*(int)H>1024) rows=1024/(int)H; if(rows<1) rows=1;
+    const char* er=getenv("PUFFER_LSTM_FUSED_ROWS");
+    if(er){ int v=0; for(const char* q=er; *q>='0'&&*q<='9'; q++) v=v*10+(*q-'0'); if(v>=1 && v*(int)H<=1024) rows=v; }
+    size_t fs=((size_t)H4*SW + (size_t)rows*H)*sR, bs=((size_t)H4*SW + (size_t)rows*H4)*sR;
+    size_t need=fs>bs?fs:bs; int dev=0; cudaGetDevice(&dev); int maxOptin=0;
+    cudaDeviceGetAttribute(&maxOptin,cudaDevAttrMaxSharedMemoryPerBlockOptin,dev);
+    const char* off=getenv("PUFFER_LSTM_FUSED"); int disabled=(off && off[0]=='0');
+    if(!disabled && (size_t)maxOptin>=need){
+      cudaError_t e1=cudaFuncSetAttribute(k_lstm_fwd_fused<R>,cudaFuncAttributeMaxDynamicSharedMemorySize,(int)fs);
+      cudaError_t e2=cudaFuncSetAttribute(k_lstm_bwd_fused<R>,cudaFuncAttributeMaxDynamicSharedMemorySize,(int)bs);
+      if(e1==cudaSuccess && e2==cudaSuccess){ fusedRows=rows; fwdSmem=fs; bwdSmem=bs; }
+    }
+  }
+  int fusedBlk=fusedRows?(int)((B+fusedRows-1)/fusedRows):0, fusedThr=fusedRows*(int)H;
   int Bk=256;
   #define GD(x) ceildiv((long)(x),Bk)
   /* ---- FORWARD ---- input projection over the WHOLE batch, then the sequential recurrent scan ---- */
   lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)TB,(int)H4,(int)D, dObs,(int)D, dWx,(int)D, (R)0, dGin,(int)H4, bf);
-  for(size_t t=0;t<T;t++){
+  if(fusedRows){                                       /* ONE launch for the whole recurrent scan */
+    k_lstm_fwd_fused<R><<<fusedBlk,fusedThr,fwdSmem>>>(dGin,dWh,dbih,dTrm,dHst,dCst,
+      dII,dFF,dGG,dOO,dTC,dHT,dHP,dCP,(int)B,(int)T,(int)H,fusedRows);
+  } else for(size_t t=0;t<T;t++){
     if(t>0) k_lstm_reset<R><<<GD(BH),Bk>>>(dHst,dCst,dTrm,(int)B,(int)H,(int)t);
     lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)B,(int)H4,(int)H, dHst,(int)H, dWh,(int)H, (R)0, dGrec,(int)H4, bf);
     size_t sBH=(size_t)t*BH;
@@ -7000,13 +7139,18 @@ static int lstm_bptt_dev_R(const double* pp, const double* obsBd, const double* 
   lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)O,(int)H,(int)TB, dOutg,(int)O, dHT,(int)H, (R)0, gWo,(int)H, bf);
   k_lstm_colsum<R><<<(int)O,256>>>(gbo,dOutg,TB,(int)O);
   lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_N,(int)TB,(int)H,(int)O, dOutg,(int)O, dWo,(int)H, (R)0, dHfromOut,(int)H, bf);
-  cudaMemset(dHnext,0,BH*sR); cudaMemset(dCnext,0,BH*sR);
-  for(size_t tt=T; tt-->0; ){
-    size_t t=tt, sBH=(size_t)t*BH;
-    k_lstm_gate_bwd<R><<<GD(BH),Bk>>>(dII+sBH,dFF+sBH,dGG+sBH,dOO+sBH,dTC+sBH,dCP+sBH,
-      dHfromOut+sBH, dHnext,dCnext, dCprevG, dG+(size_t)t*BH4, (int)B,(int)H);
-    lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_N,(int)B,(int)H,(int)H4, dG+(size_t)t*BH4,(int)H4, dWh,(int)H, (R)0, dHprevG,(int)H, bf);
-    k_lstm_carry<R><<<GD(BH),Bk>>>(dHnext,dCnext, dHprevG,dCprevG, dTrm,(int)B,(int)H,(int)t);
+  if(fusedRows){                                       /* ONE launch for the whole recurrent backward */
+    k_lstm_bwd_fused<R><<<fusedBlk,fusedThr,bwdSmem>>>(dII,dFF,dGG,dOO,dTC,dCP,dHfromOut,dWh,dTrm,
+      dG,(int)B,(int)T,(int)H,fusedRows);
+  } else {
+    cudaMemset(dHnext,0,BH*sR); cudaMemset(dCnext,0,BH*sR);
+    for(size_t tt=T; tt-->0; ){
+      size_t t=tt, sBH=(size_t)t*BH;
+      k_lstm_gate_bwd<R><<<GD(BH),Bk>>>(dII+sBH,dFF+sBH,dGG+sBH,dOO+sBH,dTC+sBH,dCP+sBH,
+        dHfromOut+sBH, dHnext,dCnext, dCprevG, dG+(size_t)t*BH4, (int)B,(int)H);
+      lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_N,(int)B,(int)H,(int)H4, dG+(size_t)t*BH4,(int)H4, dWh,(int)H, (R)0, dHprevG,(int)H, bf);
+      k_lstm_carry<R><<<GD(BH),Bk>>>(dHnext,dCnext, dHprevG,dCprevG, dTrm,(int)B,(int)H,(int)t);
+    }
   }
   lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)H4,(int)D,(int)TB, dG,(int)H4, dObs,(int)D, (R)0, gWx,(int)D, bf);
   lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)H4,(int)H,(int)TB, dG,(int)H4, dHP,(int)H, (R)0, gWh,(int)H, bf);

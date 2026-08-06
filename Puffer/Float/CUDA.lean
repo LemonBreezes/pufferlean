@@ -165,6 +165,13 @@ opaque cudaMgVtraceFFI (N T : USize) (gamma lam rhoClip cClip : Float) : IO Floa
 @[extern "lean_cuda_mg_loss_enable"]
 opaque cudaMgLossEnableFFI (on : UInt8) : IO Unit
 
+/-- **LSTM BPTT input reuse** — the recurrent trainer runs `epochs` BPTT-grad calls per update over the
+    SAME rollout inputs (obs/act/adv/ret/old/term); only the weights change. Call with `on=0` on the
+    first epoch (fresh upload) and `on=1` on later epochs so the grad kernel skips re-uploading those
+    read-only device buffers H2D. Bit-identical result (same bytes reused), determinism-safe. -/
+@[extern "lean_cuda_lstm_reuse_inputs"]
+opaque cudaLstmReuseInputsFFI (on : UInt8) : IO Unit
+
 /-- Read the 7 most-recent dashboard losses computed by the grad: `[policy, value, entropy, total,
     old_kl, kl, clipfrac]`. Zeros until the first grad call with loss surfacing enabled. -/
 @[extern "lean_cuda_mg_read_losses"]

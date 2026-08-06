@@ -1350,7 +1350,7 @@ def trainPluginEnvRec (name config : String)
   let mut obs ← Puffer.Plugin.envReset h            -- N·D
   let mut updNs : Nat := 0
   let mut lastLog : Array (String × Float) := #[]   -- env's own PufferLib `Log`, latest non-empty window
-  let mut rollNs : Nat := 0; let mut bpttNs : Nat := 0; let mut tmNs : Nat := 0
+  let mut rollNs : Nat := 0; let mut bpttNs : Nat := 0; let mut tmNs : Nat := 0; let mut ffiNs : Nat := 0
   -- `--log` live dashboard state (opt-in; the ad-hoc line below stays byte-identical without it). The 7
   -- losses are surfaced from the batched BPTT grad (lstm_surface_losses in pufferblas.c) ONLY on the last
   -- epoch of a render frame, toggled by cudaMgLossEnableFFI — read-only, cannot perturb the update.
@@ -1404,9 +1404,14 @@ def trainPluginEnvRec (name config : String)
       -- Enable the loss readback ONLY on the last epoch of a render frame; the BLAS BPTT grad then reduces
       -- the 7 losses into the shared g_mgLoss channel (read-only), read by cudaMgReadLossesFFI below.
       if logDash then Puffer.Float.CUDA.cudaMgLossEnableFFI (if willRender && ep + 1 == epochs then 1 else 0)
+      -- obs/act/adv/ret/old/term are identical across this update's epochs ⇒ skip their H2D re-upload
+      -- on epochs>0 (device buffers persist); only the weights change. Bit-identical, determinism-safe.
+      Puffer.Float.CUDA.cudaLstmReuseInputsFFI (if ep == 0 then 0 else 1)
       let params := flattenRec p
+      let f0 ← IO.monoNanosNow
       let g := gradStep params obsB actB advB retB oldB termB
                  initHsF initCsF (u N) (u T) (u H) (u D) (u A) vfCoef entCoef clipEps
+      ffiNs := ffiNs + ((← IO.monoNanosNow) - f0)
       let mut sq := 0.0
       for i in [0:g.size] do sq := sq + g[i]! * g[i]!
       let mb := Float.ofNat (N * T)
@@ -1442,7 +1447,7 @@ def trainPluginEnvRec (name config : String)
   Puffer.Plugin.envClose h
   let envSteps := updates * N * T
   let sps := if updNs == 0 then 0 else envSteps * 1000000000 / updNs
-  IO.println s!"done. perf: {envSteps} env-steps ⇒ {sps} SPS   [native-rollout {rollNs/1000000}ms, GAE-prep {tmNs/1000000}ms, BPTT {bpttNs/1000000}ms]"
+  IO.println s!"done. perf: {envSteps} env-steps ⇒ {sps} SPS   [native-rollout {rollNs/1000000}ms, GAE-prep {tmNs/1000000}ms, BPTT {bpttNs/1000000}ms (ffi {ffiNs/1000000}ms, host {(bpttNs-ffiNs)/1000000}ms)]"
 
 /-! ### Gaussian (continuous) head — native gradient trainer -/
 
