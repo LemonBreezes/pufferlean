@@ -4,7 +4,7 @@
 The nvcc-compiled GPU training-step layer. Each kernel here is verified against the machine-checked
 Lean oracle at the stated precision (`verify-*-gpu` modes) — the GPU counterpart of `Puffer.Float.BLAS`.
 These run in f64 to stay tight against the f64 oracle (V-Trace scan is bit-exact; Muon's Newton–Schulz
-via f64 cuBLAS matches to ~1e-13). See `docs/gpu-training-scope.md`.
+via f64 cuBLAS matches to ~1e-13).
 -/
 namespace Puffer.Float.CUDA
 

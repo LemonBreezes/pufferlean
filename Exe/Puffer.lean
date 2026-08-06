@@ -1286,7 +1286,7 @@ def main (args : List String) : IO Unit := do
       IO.println s!"verify-train-update-resident (resident whole-update vs per-minibatch loop, NT={NT} epochs={epochs} numMB={numMB} P={P}):"
       IO.println s!"  pm max|Δ| = {dmax}   ({if dmax == 0.0 then "ok ✓ (bit-exact)" else if dmax < 1.0e-9 then "ok ✓ (tolerance)" else "CHECK"})"
   | "verify-sample-gpu" :: _ => do
-      -- R2 (docs/gpu-rollout-scope.md): device categorical sampler (`cudaSampleActionsFFI`) vs the CPU C
+      -- R2: device categorical sampler (`cudaSampleActionsFFI`) vs the CPU C
       -- sampler (`sampleActionsBatchFFI`, itself bit-exact vs softmax+sampleCat). Same per-env splitmix64
       -- stream ⇒ actions/values exact; logps to transcendental ULP (device exp/log vs libm).
       let N := 256; let A := 6; let O := A + 1

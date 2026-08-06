@@ -1417,7 +1417,7 @@ extern "C" LEAN_EXPORT lean_obj_res lean_cuda_train_update_wide_resident(
    EXACTLY and logp to transcendental ULP (device exp/log vs libm). The one caveat (device≠host `exp`): at a
    measure-zero cumulative-probability boundary — u within a ULP of a category edge — the sampled action can
    differ from the CPU sampler. That is a valid categorical draw either way, the same tolerance the bf16
-   rollout forward already accepts (docs/gpu-rollout-scope.md), not a defect. One thread per env. R3 reads
+   rollout forward already accepts, not a defect. One thread per env. R3 reads
    resident logits and writes resident columns; this test FFI round-trips. */
 __device__ __forceinline__ unsigned long long d_sm64(unsigned long long s){
   unsigned long long z = s;
