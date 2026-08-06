@@ -1317,10 +1317,12 @@ def trainPluginEnvRec (name config : String)
   -- default all-cores OpenBLAS threading measured WORSE than a small fixed count here (see
   -- `lean_ffi_blas_set_threads`'s doc comment for the numbers).
   Puffer.Float.BLAS.blasSetThreadsFFI (u 8)
-  -- Opt-in f32 tier (PUFFER_LSTM_F32=1): cblas_sgemm instead of cblas_dgemm throughout, verified
-  -- against the f64-BLAS kernels by `verify-lstm-fwd-f32`/`verify-lstm-grad-f32` (~1e-6 relative).
-  -- Default OFF, matching this project's convention of landing a new precision tier opt-in first.
-  let useF32 := (← IO.getEnv "PUFFER_LSTM_F32").getD "0" != "0"
+  -- BPTT precision tier. DEFAULT f32 (sgemm) — this is the production tier: PufferLib's LSTM runs
+  -- f32 (torch default) and MinGRU's parity is measured on its fast tiers too, so f64 here would be an
+  -- apples-to-oranges handicap (f64 is ~1/64 f32 on a consumer 5090). The f32 tier is verified against
+  -- the f64-BLAS kernels by `verify-lstm-fwd-f32`/`verify-lstm-grad-f32` (~1e-6 relative) with identical
+  -- 3-seed learning traces. PUFFER_LSTM_F64=1 forces the f64 path (the bit-exact oracle anchor).
+  let useF32 := (← IO.getEnv "PUFFER_LSTM_F64").getD "0" == "0"
   -- BPTT precision tier (the native rollout forward is always f64 device-BLAS; the f32 tier only
   -- reprecisions the BPTT gradient, an independent computation from the rollout forward).
   let gradStep := if useF32 then Puffer.Float.BLAS.lstmPPOGradBatchBlasF32FFI else Puffer.Float.BLAS.lstmPPOGradBatchBlasFFI
