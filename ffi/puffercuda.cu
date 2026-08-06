@@ -6899,14 +6899,20 @@ __global__ void k_lstm_colsum(R* gb, const R* M, long rows, int J){
 }
 
 /* row-major C[M×N] = opA(A)·opB(B) + beta·C via the col-major swap (pass B then A), f64 / f32 overloads
-   (same identity as the MinGRU sgemm_rm). alpha is always 1. */
+   (same identity as the MinGRU sgemm_rm). alpha is always 1. `bf` selects the bf16 TENSOR-CORE tier for
+   the f32 overload: bf=0 is the exact cublasSgemm (f32 tier, unchanged); bf=1 rounds the operands to
+   bf16 for the tensor-core MAC with f32 accumulate (CUBLAS_COMPUTE_32F_FAST_16BF, the same FAST_16BF
+   path MinGRU's gemm32 uses — no manual bf16 buffers). The f64 overload ignores `bf` (always Dgemm). */
 static cublasStatus_t lstm_gemm(cublasHandle_t h, cublasOperation_t opA, cublasOperation_t opB,
-    int M, int N, int K, const double* A, int lda, const double* B, int ldb, double beta, double* C, int ldc){
-  double al=1.0; return cublasDgemm(h, opB, opA, N, M, K, &al, B, ldb, A, lda, &beta, C, ldc);
+    int M, int N, int K, const double* A, int lda, const double* B, int ldb, double beta, double* C, int ldc, int bf=0){
+  (void)bf; double al=1.0; return cublasDgemm(h, opB, opA, N, M, K, &al, B, ldb, A, lda, &beta, C, ldc);
 }
 static cublasStatus_t lstm_gemm(cublasHandle_t h, cublasOperation_t opA, cublasOperation_t opB,
-    int M, int N, int K, const float* A, int lda, const float* B, int ldb, float beta, float* C, int ldc){
-  float al=1.0f; return cublasSgemm(h, opB, opA, N, M, K, &al, B, ldb, A, lda, &beta, C, ldc);
+    int M, int N, int K, const float* A, int lda, const float* B, int ldb, float beta, float* C, int ldc, int bf=0){
+  float al=1.0f;
+  if(!bf) return cublasSgemm(h, opB, opA, N, M, K, &al, B, ldb, A, lda, &beta, C, ldc);
+  return cublasGemmEx(h, opB, opA, N, M, K, &al, B, CUDA_R_32F, ldb, A, CUDA_R_32F, lda,
+                      &beta, C, CUDA_R_32F, ldc, CUBLAS_COMPUTE_32F_FAST_16BF, CUBLAS_GEMM_DEFAULT);
 }
 /* host→device upload with an f64→R cast for the f32 tier (direct memcpy when R==double). */
 static void lstm_up(double* d, const double* s, size_t n){ cudaMemcpy(d,s,n*sizeof(double),cudaMemcpyHostToDevice); }
@@ -6945,7 +6951,7 @@ template<typename R>
 static int lstm_bptt_dev_R(const double* pp, const double* obsBd, const double* actAd,
     const double* advAd, const double* retAd, const double* oldAd, const double* termAd,
     const double* h0sd, const double* c0sd, size_t B, size_t T, size_t H, size_t D, size_t A,
-    double vfCoef, double entCoef, double clipEps, double* gOut, double* outHostOrNull){
+    double vfCoef, double entCoef, double clipEps, double* gOut, double* outHostOrNull, int bf){
   cublasHandle_t hbl=cu_handle();
   if(!hbl || B==0 || T==0 || H==0 || A>64) return 0;
   size_t O=A+1, H4=4*H;
@@ -6979,31 +6985,31 @@ static int lstm_bptt_dev_R(const double* pp, const double* obsBd, const double* 
   int Bk=256;
   #define GD(x) ceildiv((long)(x),Bk)
   /* ---- FORWARD ---- input projection over the WHOLE batch, then the sequential recurrent scan ---- */
-  lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)TB,(int)H4,(int)D, dObs,(int)D, dWx,(int)D, (R)0, dGin,(int)H4);
+  lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)TB,(int)H4,(int)D, dObs,(int)D, dWx,(int)D, (R)0, dGin,(int)H4, bf);
   for(size_t t=0;t<T;t++){
     if(t>0) k_lstm_reset<R><<<GD(BH),Bk>>>(dHst,dCst,dTrm,(int)B,(int)H,(int)t);
-    lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)B,(int)H4,(int)H, dHst,(int)H, dWh,(int)H, (R)0, dGrec,(int)H4);
+    lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)B,(int)H4,(int)H, dHst,(int)H, dWh,(int)H, (R)0, dGrec,(int)H4, bf);
     size_t sBH=(size_t)t*BH;
     k_lstm_gate_fwd<R><<<GD(BH),Bk>>>(dGin+(size_t)t*B*H4, dGrec, dbih, dHst, dCst,
       dII+sBH,dFF+sBH,dGG+sBH,dOO+sBH,dTC+sBH,dHT+sBH,dHP+sBH,dCP+sBH,(int)B,(int)H);
   }
-  lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)TB,(int)O,(int)H, dHT,(int)H, dWo,(int)H, (R)0, dOUT,(int)O);
+  lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_T,(int)TB,(int)O,(int)H, dHT,(int)H, dWo,(int)H, (R)0, dOUT,(int)O, bf);
   k_lstm_add_bias<R><<<GD((long)TB*O),Bk>>>(dOUT,dbo,TB,(int)O);
   /* ---- BACKWARD ---- PPO objective + non-recurrent grads batched, the (h,c) carry sequential ---- */
   k_lstm_ppo_dout<R><<<GD(TB),Bk>>>(dOUT,dAct,dAdv,dRet,dOld,dOutg,TB,(int)A,(int)O,(R)vfCoef,(R)entCoef,(R)clipEps);
-  lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)O,(int)H,(int)TB, dOutg,(int)O, dHT,(int)H, (R)0, gWo,(int)H);
+  lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)O,(int)H,(int)TB, dOutg,(int)O, dHT,(int)H, (R)0, gWo,(int)H, bf);
   k_lstm_colsum<R><<<(int)O,256>>>(gbo,dOutg,TB,(int)O);
-  lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_N,(int)TB,(int)H,(int)O, dOutg,(int)O, dWo,(int)H, (R)0, dHfromOut,(int)H);
+  lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_N,(int)TB,(int)H,(int)O, dOutg,(int)O, dWo,(int)H, (R)0, dHfromOut,(int)H, bf);
   cudaMemset(dHnext,0,BH*sR); cudaMemset(dCnext,0,BH*sR);
   for(size_t tt=T; tt-->0; ){
     size_t t=tt, sBH=(size_t)t*BH;
     k_lstm_gate_bwd<R><<<GD(BH),Bk>>>(dII+sBH,dFF+sBH,dGG+sBH,dOO+sBH,dTC+sBH,dCP+sBH,
       dHfromOut+sBH, dHnext,dCnext, dCprevG, dG+(size_t)t*BH4, (int)B,(int)H);
-    lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_N,(int)B,(int)H,(int)H4, dG+(size_t)t*BH4,(int)H4, dWh,(int)H, (R)0, dHprevG,(int)H);
+    lstm_gemm(hbl,CUBLAS_OP_N,CUBLAS_OP_N,(int)B,(int)H,(int)H4, dG+(size_t)t*BH4,(int)H4, dWh,(int)H, (R)0, dHprevG,(int)H, bf);
     k_lstm_carry<R><<<GD(BH),Bk>>>(dHnext,dCnext, dHprevG,dCprevG, dTrm,(int)B,(int)H,(int)t);
   }
-  lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)H4,(int)D,(int)TB, dG,(int)H4, dObs,(int)D, (R)0, gWx,(int)D);
-  lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)H4,(int)H,(int)TB, dG,(int)H4, dHP,(int)H, (R)0, gWh,(int)H);
+  lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)H4,(int)D,(int)TB, dG,(int)H4, dObs,(int)D, (R)0, gWx,(int)D, bf);
+  lstm_gemm(hbl,CUBLAS_OP_T,CUBLAS_OP_N,(int)H4,(int)H,(int)TB, dG,(int)H4, dHP,(int)H, (R)0, gWh,(int)H, bf);
   k_lstm_colsum<R><<<(int)H4,256>>>(gbih,dG,TB,(int)H4);
   #undef GD
   cudaDeviceSynchronize();
@@ -7016,14 +7022,17 @@ static int lstm_bptt_dev_R(const double* pp, const double* obsBd, const double* 
   return 1;
 }
 
-/* C entry called from pufferblas.c: dispatch the f64 default vs the f32 tier. */
+/* C entry called from pufferblas.c: dispatch the tier. tier: 0 = f64 cublasDgemm (bit-exact oracle),
+   1 = f32 cublasSgemm, 2 = bf16 tensor cores (float buffers, CUBLAS_COMPUTE_32F_FAST_16BF on the GEMMs,
+   f32 accumulate; the gate/PPO elementwise kernels stay f32). */
 extern "C" int cuda_lstm_ppo_grad_batch(
     const double* pp, const double* obsB, const double* actA, const double* advA,
     const double* retA, const double* oldA, const double* termA,
     const double* h0s, const double* c0s, size_t B, size_t T, size_t H, size_t D, size_t A,
-    double vfCoef, double entCoef, double clipEps, double* gOut, double* outHostOrNull, int useF32){
-  if(useF32) return lstm_bptt_dev_R<float >(pp,obsB,actA,advA,retA,oldA,termA,h0s,c0s,B,T,H,D,A,vfCoef,entCoef,clipEps,gOut,outHostOrNull);
-  return            lstm_bptt_dev_R<double>(pp,obsB,actA,advA,retA,oldA,termA,h0s,c0s,B,T,H,D,A,vfCoef,entCoef,clipEps,gOut,outHostOrNull);
+    double vfCoef, double entCoef, double clipEps, double* gOut, double* outHostOrNull, int tier){
+  if(tier==2) return lstm_bptt_dev_R<float >(pp,obsB,actA,advA,retA,oldA,termA,h0s,c0s,B,T,H,D,A,vfCoef,entCoef,clipEps,gOut,outHostOrNull,1);
+  if(tier==1) return lstm_bptt_dev_R<float >(pp,obsB,actA,advA,retA,oldA,termA,h0s,c0s,B,T,H,D,A,vfCoef,entCoef,clipEps,gOut,outHostOrNull,0);
+  return             lstm_bptt_dev_R<double>(pp,obsB,actA,advA,retA,oldA,termA,h0s,c0s,B,T,H,D,A,vfCoef,entCoef,clipEps,gOut,outHostOrNull,0);
 }
 
 /* ================= NATIVE DEVICE-RESIDENT LSTM ROLLOUT DRIVER ================================

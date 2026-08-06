@@ -163,6 +163,16 @@ opaque lstmPPOGradBatchBlasFFI (params obsB acts advs rets oldlps terms h0s c0s 
 opaque lstmPPOGradBatchBlasF32FFI (params obsB acts advs rets oldlps terms h0s c0s : FloatArray)
   (B T H D A : USize) (vfCoef entCoef clipEps : Float) : FloatArray
 
+/-- **bf16 tensor-core tier** of `lstmPPOGradBatchBlasFFI` — same algorithm as the f32 tier, but the GPU
+    BPTT GEMMs run on bf16 tensor cores (float buffers rounded to bf16 for the MAC, f32 accumulate via
+    `CUBLAS_COMPUTE_32F_FAST_16BF`; the gate/PPO elementwise kernels stay f32). Another tolerance step
+    past the f32 tier (bf16 has an 8-bit mantissa; verified vs the f64 path by `verify-lstm-grad-bf16`).
+    No CPU bf16 form — the no-device fallback is the shared f32 CPU path. Opt-in (`PUFFER_LSTM_BF16=1`
+    gates `trainPluginEnvRec`'s choice of this vs the f32 default). -/
+@[extern "lean_ffi_lstm_ppo_grad_batch_blas_bf16"]
+opaque lstmPPOGradBatchBlasBf16FFI (params obsB acts advs rets oldlps terms h0s c0s : FloatArray)
+  (B T H D A : USize) (vfCoef entCoef clipEps : Float) : FloatArray
+
 /-- **Batched LSTM forward step via BLAS** — the BLAS twin of `lstmFwdStepBatchFFI`
     (`Puffer.Float.FFI`, naive scalar loops, bit-exact vs `lstmCellF`). Same math, gate/head
     pre-activations via `cblas_dgemm` instead of scalar dot products — faster (SIMD-vectorized,

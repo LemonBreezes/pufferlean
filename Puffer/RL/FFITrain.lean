@@ -1321,11 +1321,16 @@ def trainPluginEnvRec (name config : String)
   -- f32 (torch default) and MinGRU's parity is measured on its fast tiers too, so f64 here would be an
   -- apples-to-oranges handicap (f64 is ~1/64 f32 on a consumer 5090). The f32 tier is verified against
   -- the f64-BLAS kernels by `verify-lstm-fwd-f32`/`verify-lstm-grad-f32` (~1e-6 relative) with identical
-  -- 3-seed learning traces. PUFFER_LSTM_F64=1 forces the f64 path (the bit-exact oracle anchor).
-  let useF32 := (← IO.getEnv "PUFFER_LSTM_F64").getD "0" == "0"
-  -- BPTT precision tier (the native rollout forward is always f64 device-BLAS; the f32 tier only
-  -- reprecisions the BPTT gradient, an independent computation from the rollout forward).
-  let gradStep := if useF32 then Puffer.Float.BLAS.lstmPPOGradBatchBlasF32FFI else Puffer.Float.BLAS.lstmPPOGradBatchBlasFFI
+  -- 3-seed learning traces. PUFFER_LSTM_F64=1 forces the f64 path (the bit-exact oracle anchor);
+  -- PUFFER_LSTM_BF16=1 selects the bf16 tensor-core BPTT-GEMM tier (verified by `verify-lstm-grad-bf16`).
+  let useF64 := (← IO.getEnv "PUFFER_LSTM_F64").getD "0" == "1"
+  let useBf16 := (← IO.getEnv "PUFFER_LSTM_BF16").getD "0" == "1"
+  -- BPTT precision tier (the native rollout forward is always f64 device-BLAS; the f32/bf16 tiers only
+  -- reprecision the BPTT gradient, an independent computation from the rollout forward). F64 wins if set.
+  let gradStep :=
+    if useF64 then Puffer.Float.BLAS.lstmPPOGradBatchBlasFFI
+    else if useBf16 then Puffer.Float.BLAS.lstmPPOGradBatchBlasBf16FFI
+    else Puffer.Float.BLAS.lstmPPOGradBatchBlasF32FFI
   let h ← Puffer.Plugin.envOpen name (u numEnvs) seed config
   if h == 0 then IO.println s!"puffer train: env '{name}' not found — run ocean/build.sh {name}"; return
   let D := (Puffer.Plugin.envObsDim h).toNat

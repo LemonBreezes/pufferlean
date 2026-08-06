@@ -1939,6 +1939,46 @@ def main (args : List String) : IO Unit := do
         maxRel := max maxRel (d / (Float.abs gB64[i]! + 1.0e-12))
       IO.println s!"verify-lstm-grad-f32 (batched BPTT grad, B={B} T={T} H={H} D={D} A={A}) f32-BLAS vs f64-BLAS:"
       IO.println s!"  max abs diff = {maxAbs}   max rel diff = {maxRel}   (P={gB64.size}; tolerance, not bit-exact)"
+  | "verify-lstm-grad-bf16" :: _ => do
+      -- bf16 tensor-core BPTT grad (CUBLAS_COMPUTE_32F_FAST_16BF GEMMs) vs the f64-BLAS batched grad — a
+      -- LOOSER tolerance step than f32 (bf16 has an 8-bit mantissa). Not vs the scalar oracle directly.
+      let B := 4; let T := 5; let H := 3; let D := 4; let A := 2; let O := A + 1
+      let (p, _) := Puffer.RL.NNTrain.initRec D H O 0x5EED
+      let mut rng : UInt64 := 0xBEEF
+      let mut h0s : Array Float := #[]; let mut c0s : Array Float := #[]
+      for _ in [0:B] do
+        for _ in [0:H] do let (v, r) := randF (-0.3) 0.3 rng; rng := r; h0s := h0s.push v
+      for _ in [0:B] do
+        for _ in [0:H] do let (v, r) := randF (-0.3) 0.3 rng; rng := r; c0s := c0s.push v
+      let mut obsTM : Array Float := Array.replicate (T*B*D) 0.0
+      let mut actTM : Array Float := Array.replicate (T*B) 0.0
+      let mut advTM : Array Float := Array.replicate (T*B) 0.0
+      let mut retTM : Array Float := Array.replicate (T*B) 0.0
+      let mut oldTM : Array Float := Array.replicate (T*B) 0.0
+      let mut trmTM : Array Float := Array.replicate (T*B) 0.0
+      for b in [0:B] do
+        for t in [0:T] do
+          let tmIdx := t*B + b
+          for d in [0:D] do let (v, r) := randF (-1.0) 1.0 rng; rng := r; obsTM := obsTM.set! (tmIdx*D+d) v
+          let (aw, r1) := rngNext rng; rng := r1; actTM := actTM.set! tmIdx (Float.ofNat (aw.toNat % A))
+          let (av, r2) := randF (-1.0) 1.0 rng; rng := r2; advTM := advTM.set! tmIdx av
+          let (rv, r3) := randF 0.0 2.0 rng; rng := r3; retTM := retTM.set! tmIdx rv
+          oldTM := oldTM.set! tmIdx (-0.8)
+          trmTM := trmTM.set! tmIdx (if t == 2 && b % 2 == 0 then 1.0 else 0.0)
+      let params := Puffer.RL.NNTrain.flattenRec p
+      let u1 := USize.ofNat; let vf := 0.5; let ent := 0.01; let clip := 0.2
+      let mk := FloatArray.mk
+      let gB64 := Puffer.Float.BLAS.lstmPPOGradBatchBlasFFI params (mk obsTM) (mk actTM) (mk advTM)
+                  (mk retTM) (mk oldTM) (mk trmTM) (mk h0s) (mk c0s) (u1 B) (u1 T) (u1 H) (u1 D) (u1 A) vf ent clip
+      let gBf := Puffer.Float.BLAS.lstmPPOGradBatchBlasBf16FFI params (mk obsTM) (mk actTM) (mk advTM)
+                  (mk retTM) (mk oldTM) (mk trmTM) (mk h0s) (mk c0s) (u1 B) (u1 T) (u1 H) (u1 D) (u1 A) vf ent clip
+      let mut maxAbs := 0.0; let mut maxRel := 0.0
+      for i in [0:gB64.size] do
+        let d := Float.abs (gBf[i]! - gB64[i]!)
+        maxAbs := max maxAbs d
+        maxRel := max maxRel (d / (Float.abs gB64[i]! + 1.0e-12))
+      IO.println s!"verify-lstm-grad-bf16 (batched BPTT grad, B={B} T={T} H={H} D={D} A={A}) bf16-tensor-core vs f64-BLAS:"
+      IO.println s!"  max abs diff = {maxAbs}   max rel diff = {maxRel}   (P={gB64.size}; bf16 8-bit mantissa, looser tolerance)"
   | "verify-lstm-fwd-blas" :: _ => do
       -- lstmFwdStepBatchBlasFFI (cblas_dgemm) vs lstmFwdStepBatchFFI (naive scalar, bit-exact vs lstmCellF)
       let N := 5; let D := 4; let H := 3; let A := 2; let O := A + 1

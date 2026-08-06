@@ -39,14 +39,15 @@ extern int g_mgLossOn;
 extern double g_mgLoss[7];
 
 /* GPU-resident LSTM BPTT (ffi/puffercuda.cu). Fills gOut[P] and returns 1 on success; returns 0 (no
-   usable device / unsupported shape) so the two BLAS BPTT kernels below run their CPU fallback. On --log
-   render frames `outHostOrNull` receives the T·B·O logits for the shared dashboard-loss reducer. useF32
-   picks cublasSgemm (the f32 tier) vs cublasDgemm (the f64 default). */
+   usable device / unsupported shape) so the three BLAS BPTT kernels below run their CPU fallback. On --log
+   render frames `outHostOrNull` receives the T·B·O logits for the shared dashboard-loss reducer. `tier`
+   picks the GEMM precision: 0 = cublasDgemm (f64 default), 1 = cublasSgemm (f32 tier), 2 = bf16 tensor
+   cores (float buffers, CUBLAS_COMPUTE_32F_FAST_16BF, f32 accumulate). */
 extern int cuda_lstm_ppo_grad_batch(
     const double* pp, const double* obsB, const double* actA, const double* advA,
     const double* retA, const double* oldA, const double* termA,
     const double* h0s, const double* c0s, size_t B, size_t T, size_t H, size_t D, size_t A,
-    double vfCoef, double entCoef, double clipEps, double* gOut, double* outHostOrNull, int useF32);
+    double vfCoef, double entCoef, double clipEps, double* gOut, double* outHostOrNull, int tier);
 /* PUFFER_LSTM_GPU=0 forces the CPU BLAS path (A/B + the CPU-oracle cross-check); default uses the GPU. */
 static int lstm_gpu_off(void){ static int v=-1; if(v<0){ const char* e=getenv("PUFFER_LSTM_GPU"); v=(e&&e[0]=='0'); } return v; }
 
@@ -1015,6 +1016,14 @@ LEAN_EXPORT lean_obj_res lean_ffi_lstm_ppo_grad_batch_blas(
   return go;
 }
 
+/* CPU f32 BPTT-grad fallback, shared by the f32 and bf16 GPU tiers (defined just below the f32 wrapper). */
+static void lstm_grad_batch_cpu_f32(
+    const double* ppd, const double* obsBd, const double* actA, const double* advA,
+    const double* retA, const double* oldA, const double* termA,
+    const double* h0sd, const double* c0sd,
+    size_t B, size_t T, size_t H, size_t D, size_t A,
+    double vfCoef, double entCoef, double clipEps, double* g);
+
 /* ---- Batched LSTM+PPO BPTT gradient via BLAS, f32 TIER (a further precision step past the f64-BLAS
    tier above) ------------------------------------------------------------------------------------
    Same algorithm as `lean_ffi_lstm_ppo_grad_batch_blas`, but weights/obs/all per-timestep activations
@@ -1055,6 +1064,22 @@ LEAN_EXPORT lean_obj_res lean_ffi_lstm_ppo_grad_batch_blas_f32(
     }
     if (outH) free(outH);
   }
+  lstm_grad_batch_cpu_f32(ppd, obsBd, actA, advA, retA, oldA, termA, h0sd, c0sd,
+                          B, T, H, D, A, vfCoef, entCoef, clipEps, g);
+  lean_dec(pa);lean_dec(obsBa);lean_dec(actsa);lean_dec(advsa);lean_dec(retsa);lean_dec(oldlpsa);lean_dec(termsa);lean_dec(h0sa);lean_dec(c0sa);
+  return go;
+}
+
+/* CPU f32 BPTT-grad fallback (no usable device): the staged-to-float cblas_sgemm twin of the f64-BLAS
+   body, extracted verbatim so the f32 and bf16 GPU tiers share ONE CPU path (bf16 has no CPU form — f32
+   is its closest fallback). Writes the flat gradient g[P]; the caller owns the lean_obj lifetimes. */
+static void lstm_grad_batch_cpu_f32(
+    const double* ppd, const double* obsBd, const double* actA, const double* advA,
+    const double* retA, const double* oldA, const double* termA,
+    const double* h0sd, const double* c0sd,
+    size_t B, size_t T, size_t H, size_t D, size_t A,
+    double vfCoef, double entCoef, double clipEps, double* g) {
+  size_t O = A + 1, H4 = 4*H;
   double* ogWx = g; double* ogWh = ogWx + H4*D; double* ogbih = ogWh + H4*H; double* ogWo = ogbih + H4; double* ogbo = ogWo + O*H;
 
   float* Wx = (float*)malloc(sizeof(float)*H4*D); float* Wh = (float*)malloc(sizeof(float)*H4*H);
@@ -1165,6 +1190,45 @@ LEAN_EXPORT lean_obj_res lean_ffi_lstm_ppo_grad_batch_blas_f32(
       lstm_surface_losses(od, actA, advA, retA, oldA, T, B, A, O, vfCoef, entCoef, clipEps); free(od); } }
   free(II);free(FF);free(GG);free(OO);free(TC);free(HP);free(CP);free(HT);free(OUT);free(G);
   free(Hprev);free(Cprev);free(dOut);free(dHt);free(dG);free(dHprev);free(dCprev);free(dHnext);free(dCnext);free(pk);
+}
+
+/* ---- Batched LSTM+PPO BPTT gradient via BLAS, bf16 TENSOR-CORE TIER (a further precision step past the
+   f32 tier) ------------------------------------------------------------------------------------------
+   Identical I/O contract and algorithm to `lean_ffi_lstm_ppo_grad_batch_blas_f32`, but the GPU BPTT runs
+   the GEMMs on bf16 tensor cores (float buffers rounded to bf16 for the MAC, f32 accumulate — cuBLAS
+   CUBLAS_COMPUTE_32F_FAST_16BF; the gate/PPO elementwise kernels stay f32). Another tolerance step past
+   the f32 tier (bf16 has an 8-bit mantissa; verified vs the f64 path by `verify-lstm-grad-bf16`). Opt-in
+   (`PUFFER_LSTM_BF16=1` gates `trainPluginEnvRec`'s choice). No CPU bf16 form — the no-device fallback is
+   the shared f32 CPU path (`lstm_grad_batch_cpu_f32`). */
+LEAN_EXPORT lean_obj_res lean_ffi_lstm_ppo_grad_batch_blas_bf16(
+    lean_obj_arg pa, lean_obj_arg obsBa, lean_obj_arg actsa, lean_obj_arg advsa,
+    lean_obj_arg retsa, lean_obj_arg oldlpsa, lean_obj_arg termsa,
+    lean_obj_arg h0sa, lean_obj_arg c0sa,
+    size_t B, size_t T, size_t H, size_t D, size_t A, double vfCoef, double entCoef, double clipEps) {
+  size_t O = A + 1, H4 = 4*H;
+  size_t P = H4*D + H4*H + H4 + O*H + O;
+  const double* ppd = lean_float_array_cptr(pa);
+  const double* obsBd = lean_float_array_cptr(obsBa);
+  const double* actA = lean_float_array_cptr(actsa); const double* advA = lean_float_array_cptr(advsa);
+  const double* retA = lean_float_array_cptr(retsa); const double* oldA = lean_float_array_cptr(oldlpsa);
+  const double* termA = lean_float_array_cptr(termsa);
+  const double* h0sd = lean_float_array_cptr(h0sa); const double* c0sd = lean_float_array_cptr(c0sa);
+  lean_object* go = lean_alloc_sarray(sizeof(double), P, P);
+  double* g = lean_float_array_cptr(go);
+  /* GPU-resident BPTT, bf16 tier (tensor cores); falls through to the shared f32 CPU path if no usable
+     device / unsupported shape. Verified vs the f64 path by verify-lstm-grad-bf16. */
+  if (!lstm_gpu_off()) {
+    double* outH = g_mgLossOn ? (double*)malloc(sizeof(double)*T*O*B) : NULL;
+    if (cuda_lstm_ppo_grad_batch(ppd, obsBd, actA, advA, retA, oldA, termA, h0sd, c0sd,
+                                 B, T, H, D, A, vfCoef, entCoef, clipEps, g, outH, 2)) {
+      if (outH) { lstm_surface_losses(outH, actA, advA, retA, oldA, T, B, A, O, vfCoef, entCoef, clipEps); free(outH); }
+      lean_dec(pa);lean_dec(obsBa);lean_dec(actsa);lean_dec(advsa);lean_dec(retsa);lean_dec(oldlpsa);lean_dec(termsa);lean_dec(h0sa);lean_dec(c0sa);
+      return go;
+    }
+    if (outH) free(outH);
+  }
+  lstm_grad_batch_cpu_f32(ppd, obsBd, actA, advA, retA, oldA, termA, h0sd, c0sd,
+                          B, T, H, D, A, vfCoef, entCoef, clipEps, g);
   lean_dec(pa);lean_dec(obsBa);lean_dec(actsa);lean_dec(advsa);lean_dec(retsa);lean_dec(oldlpsa);lean_dec(termsa);lean_dec(h0sa);lean_dec(c0sa);
   return go;
 }
