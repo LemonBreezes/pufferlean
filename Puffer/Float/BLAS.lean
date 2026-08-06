@@ -130,7 +130,7 @@ opaque mlpPPOGradBatchBlasFFI (params obsB acts advs rets oldlps : FloatArray) (
     `[params(P); mom(P)]` buffer (flat `[W1|b1|W2|b2]` then the matching momentum); `grad` is the RAW
     summed minibatch gradient (`mlpPPOGradBatchBlasFFI` output) and `gscale` (= 1/N) makes it the mean.
     Returns the new `[params; mom]` (size `2·P`) — one buffer threaded, no split. Drives the CPU
-    `train-ppo-cpu` step so it is gradient-bound, not Newton–Schulz-bound (see tools/BENCH.md). -/
+    `train-ppo-cpu` step so it is gradient-bound, not Newton–Schulz-bound. -/
 @[extern "lean_ffi_muon_step_mlp"]
 opaque muonStepMlpBlasFFI (pm grad : FloatArray) (H D O : USize)
   (gscale lr wd mu eps : Float) : FloatArray

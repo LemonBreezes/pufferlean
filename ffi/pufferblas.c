@@ -1356,7 +1356,7 @@ LEAN_EXPORT uint8_t lean_ffi_cuda_available(lean_obj_arg unit) {
    `Puffer.FloatR.Muon.stepMat`/`stepVec` — the SAME f64 op order (naive matmuls, i/j/l left-to-right;
    two-level frobNorm fold), so compiled with `-ffp-contract=off` (no FMA) it is BIT-EXACT with the
    Lean oracle, at ~100× the speed of the boxed `Array (Array Float)` Lean path. This is the CPU
-   counterpart the codebase lacked (see tools/BENCH.md): it takes the CPU PPO+Muon step from
+   counterpart the codebase lacked: it takes the CPU PPO+Muon step from
    NS-bound (91–95% pure-Lean Muon) to gradient-bound. Naive matmuls (no threading) are the right
    call at the small hidden sizes a CPU trainer uses; the Gram matrices are min(rows,cols)². */
 static const double MUON_C[5][3] = {

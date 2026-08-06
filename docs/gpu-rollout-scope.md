@@ -7,7 +7,7 @@
 The training step is now the whole update resident on-device (`cudaTrainUpdateFFI`): one upload, one
 download per update. The **rollout is the last CPU boundary.** At large `numEnvs` it is ~80% of the update
 (`squared_big`: hidden 256, 512 envs × 32 → the GPU step runs in ~1.4 s but the CPU rollout dominates), so
-it caps the large-batch regime the resident step unlocks (see `tools/BENCH.md`). PufferLib's throughput
+it caps the large-batch regime the resident step unlocks. PufferLib's throughput
 comes from running the rollout on the GPU too — resident policy + device envs + device trajectory, no
 host↔device transfer in the timestep loop. This scopes that.
 
