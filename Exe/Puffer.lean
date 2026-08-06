@@ -32,6 +32,7 @@ import Puffer.RL.FFITrain
 import Puffer.RL.MinGRUTrain
 import Puffer.RL.Wandb
 import Puffer.RL.SelfLog
+import Puffer.RL.Sweep
 import Puffer.Plugin
 import Puffer.Check.Core
 import Puffer.Check.Parse
@@ -503,11 +504,17 @@ interchangeable and share one precedence chain. -/
 def parseIni (contents : String) : FlagMap := Id.run do
   let mut m : FlagMap := []
   let mut inEnv := false          -- `[env]` keys are the ENV's own kwargs, not trainer/vec settings
+  let mut inSweep := false         -- `[sweep]`/`[sweep.*.*]` keys belong to the sweep subsystem
+                                   -- (Puffer.RL.Sweep parses them itself); flattening them here would
+                                   -- collide (`distribution`/`min`/`max`/`scale` across every param
+                                   -- section) AND leak into envCfg (e.g. `[sweep] method` → the
+                                   -- whisker_racer env's own `method` kwarg). So skip them entirely.
   for raw in contents.splitOn "\n" do
     let line := ((raw.splitOn "#").headD raw).trim   -- strip inline `# …` comments
     if line.isEmpty || line.startsWith "#" || line.startsWith ";" then
       continue
     if line.startsWith "[" then
+      inSweep := (line.trim.toLower.startsWith "[sweep")
       -- Track ONLY the [env] boundary. Flattening every section to bare leaf names collides when a
       -- key name is used by both the vec and the env: whisker_racer.ini has `[vec] num_envs = 8`
       -- AND `[env] num_envs = 1024`, so the env's kwarg was resolving the trainer's env count to 8
@@ -526,7 +533,7 @@ def parseIni (contents : String) : FlagMap := Id.run do
       -- count: whisker_racer.ini's `[vec] num_envs = 8` gave a batch of 8 (23437 updates, 0.09M SPS,
       -- 100x below the sweep median) where PufferLib runs 4096 agents. Only a command-line
       -- --num-envs should set it.
-      let drop := (key == "num-envs" && !inEnv)
+      let drop := (key == "num-envs" && !inEnv) || inSweep
       if !val.isEmpty && !drop then m := m ++ [((if inEnv then "env." ++ key else key), val)]
     | _ => pure ()
   return m
@@ -561,6 +568,9 @@ def knownFlagKeys : List String :=
     "total-timesteps", "learning-rate", "lr", "epochs", "update-epochs", "gamma", "gae-lambda", "lam",
     "vf-coef", "ent-coef", "clip-coef", "clip", "seed", "horizon", "bptt-horizon",
     "num-minibatches", "num-mb", "minibatch-size", "replay-ratio", "max-grad-norm", "beta1",
+    -- beta2 is a real PufferLib [train] key (default.ini `beta2 = 0.999`) and a swept param
+    -- ([sweep.train.beta2]); accept the flag so a sweep trial's `--train.beta2 <v>` isn't rejected.
+    "beta2",
     "vf-clip-coef", "prio-alpha", "prio-beta0", "min-lr-ratio", "eps", "vtrace-rho-clip", "vtrace-c-clip",
     "anneal-lr", "checkpoint-interval",
     -- policy.* / torch.*
@@ -622,6 +632,11 @@ def usage : String :=
   "  puffer eval <env> [flags]      (GPU) load a checkpoint (--load <path>, else the env's latest\n" ++
   "                                 under checkpoints/<env>/) and run it rollout-only, printing the\n" ++
   "                                 mean episode_return + the env's PufferLib `Log`\n" ++
+  "  puffer sweep <env> [flags]     hyperparameter search: each trial spawns `puffer train`, is scored\n" ++
+  "                                 from its self-log (env/score vs uptime cost), and observed by the\n" ++
+  "                                 optimizer; prints per-trial progress + the best hypers found\n" ++
+  "  puffer paretosweep <env>       like sweep, but geomspaces per-trial total-timesteps (score-vs-cost\n" ++
+  "                                 pareto front), pinning the cost axis per trial\n" ++
   "  puffer env-log <env> [N] [T]   (CPU only, no GPU) drive an ocean env plugin with a random\n" ++
   "                                 policy and print its own PufferLib `Log` — the episode\n" ++
   "                                 statistics upstream reports — beside the terminal-flag\n" ++
@@ -666,6 +681,15 @@ def usage : String :=
   "  --tag T                       single wandb run tag\n" ++
   "  (PufferLib's live training dashboard renders by default for MinGRU envs, as in PufferLib;\n" ++
   "   set PUFFER_PLAIN_LOG=1 for machine-parseable per-update lines instead.)\n\n" ++
+  "SWEEP FLAGS  (puffer sweep / paretosweep; [sweep.<group>.<param>] Space specs come from the config)\n" ++
+  "  --sweep.method NAME           Random | ParetoGenetic | Protein (default Protein — bridges the real\n" ++
+  "                                 pufferlib.sweep.Protein via a Python co-process, PUFFER_PYTHON to pick\n" ++
+  "                                 the interpreter; falls back to native Random if it isn't importable)\n" ++
+  "  --sweep.max-runs N            number of trials (default 1200)\n" ++
+  "  --sweep.metric NAME           self-log key to optimize, scored as env/<NAME> (default score)\n" ++
+  "  --sweep.goal maximize|minimize   optimization direction (default maximize)\n" ++
+  "  --sweep.downsample N          downsampled observations per trial (default 5)\n" ++
+  "  --train.total-timesteps T     per-trial training budget (paretosweep geomspaces [T/8, T])\n\n" ++
   "DEV MODES  GPU/FFI kernel checks against the Lean f64 oracle + benchmarks:\n" ++
   "  verify-cuda | verify-ppo-grad-gpu | verify-mingru-grad-gpu | verify-mingru-md-grad[-gpu] |\n" ++
   "  verify-vtrace-gpu | … ;\n" ++
@@ -800,6 +824,51 @@ def runVerifyTraceFile (path : String) : IO Unit := do
       if !ok then do
         IO.println "verify-trace: FAILED"
         IO.Process.exit 1
+
+/-- Forwarded base flags for a sweep trial: the raw `sweep`/`paretosweep` args MINUS the env positional,
+    every `--sweep.*` flag (they configure the sweep, not the trial), and `--train.total-timesteps` (the
+    per-trial budget is set explicitly). Drops a flag's following value token too (unless `--flag=value`). -/
+partial def sweepBaseFlags : List String → Bool → List String
+  | [], _ => []
+  | tok :: tl, sawEnv =>
+    if tok.startsWith "--" then
+      let parts := (String.ofList (tok.toList.drop 2)).splitOn "="
+      let rawKey := parts.headD ""
+      let isEq := parts.length ≥ 2
+      let drop := rawKey.startsWith "sweep." || normKey ("--" ++ rawKey) == "total-timesteps"
+      if drop then
+        if isEq then sweepBaseFlags tl sawEnv
+        else match tl with
+             | v :: tl2 => if v.startsWith "--" then sweepBaseFlags tl sawEnv else sweepBaseFlags tl2 sawEnv
+             | [] => []
+      else tok :: sweepBaseFlags tl sawEnv
+    else
+      if !sawEnv then sweepBaseFlags tl true else tok :: sweepBaseFlags tl sawEnv
+
+/-- `puffer sweep <env>` / `puffer paretosweep <env>` dispatch: parse `[sweep]` config + `[sweep.*.*]`
+    param `Space`s, then run the trial loop (`Puffer.RL.Sweep.runSweep`). Config layers exactly like
+    `train` (config/default.ini ← config/<env>.ini ← CLI); `--sweep.*` overrides the `[sweep]` scalars. -/
+def doSweep (rest : List String) (pareto : Bool) : IO Unit := do
+  match (parseFlags rest).1 with
+  | none =>
+      IO.eprintln "Usage: puffer sweep <env> [--sweep.method Random|ParetoGenetic|Protein] \
+        [--sweep.max-runs N] [--train.total-timesteps T] [flags]"
+      IO.Process.exit 1
+  | some env =>
+    let baseFlags := sweepBaseFlags rest false
+    if let some bad := firstUnknownFlag baseFlags then
+      IO.eprintln s!"puffer sweep: unknown flag --{bad}. See `puffer help`, or namespace it (--train.<key> / --env.<key>)."
+      IO.Process.exit 1
+    let cli := (parseFlags rest).2
+    let flags ← loadConfigFlags env cli
+    let basePath := (cli.find? (fun kv => kv.1 == "config")).elim "config/default.ini" (·.2)
+    let sc ← Puffer.RL.Sweep.parseSweep env basePath flags
+    if sc.params.isEmpty then
+      IO.eprintln s!"puffer sweep: no [sweep.<group>.<param>] specs for '{env}' (check config/default.ini / config/{env}.ini)"
+      IO.Process.exit 1
+    let cfg := configOf env flags
+    let pufferBin := (← IO.getEnv "PUFFER_BIN").getD ".lake/build/bin/puffer"
+    Puffer.RL.Sweep.runSweep env pareto pufferBin baseFlags cfg.totalTimesteps cfg.seed sc flags
 
 def main (args : List String) : IO Unit := do
   match args with
@@ -2318,6 +2387,9 @@ def main (args : List String) : IO Unit := do
         -- self-log (PufferLib writes logs/<env>/<run_id>.json every run: config + downsampled metric
         -- history — the data its `constellation` galaxy reads). No-op if no dashboard ticks were recorded.
         Puffer.RL.SelfLog.write env cfgResolved ((g "downsample").elim 5 (fun s => parseNat s 5)) (toString (← IO.monoNanosNow))
+  | "sweep" :: rest => doSweep rest false
+  | "paretosweep" :: rest => doSweep rest true
+  | "verify-sweep-spaces" :: _ => Puffer.RL.Sweep.verifySweepSpaces
   | "verify-mingru-grad" :: _ =>
       let (a, r) := Puffer.RL.NNTrain.mingruGradCheck
       IO.println s!"mingru-grad AD-vs-finite-diff:  max|Δ| = {a}   max relΔ = {r}"
