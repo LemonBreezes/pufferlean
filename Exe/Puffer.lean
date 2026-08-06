@@ -308,7 +308,7 @@ structure Config where
   -- written to `checkpoints/<env>/<seed>/<step>.bin`; `--load <path>` (or `puffer eval`) reads them back.
   checkpointInterval : Nat := 0
   -- wandb live tracking (PufferLib `pufferl.py`: `--wandb` / `--wandb-project` / `--wandb-group` / `--tag`).
-  -- `--wandb` spawns `tools/puffer_track.py --daemon` and streams it the dashboard dict each tick.
+  -- `--wandb` runs an inline `python3 -c` wandb bridge (Puffer/RL/Wandb.lean) fed the dashboard dict each tick.
   wandb : Bool := false
   wandbProject : String := "puffer4"   -- PufferLib default wandb project
   wandbGroup : String := "debug"       -- PufferLib default wandb group
@@ -660,7 +660,7 @@ def usage : String :=
   "  --load <path>                 seed initial weights (train) / policy to score (eval) from a checkpoint\n" ++
   "  --train.seed N                RNG seed (default 42)\n" ++
   "  --wandb                       log this run to Weights & Biases live (needs `pip install wandb` +\n" ++
-  "                                 `wandb login`; streams via tools/puffer_track.py). PufferLib's --wandb.\n" ++
+  "                                 `wandb login`). Matches PufferLib's --wandb.\n" ++
   "  --wandb-project P             wandb project (default puffer4)   --wandb-group G   wandb group (default debug)\n" ++
   "  --tag T                       single wandb run tag\n" ++
   "  (PufferLib's live training dashboard renders by default for MinGRU envs, as in PufferLib;\n" ++
