@@ -1,0 +1,26 @@
+{
+  "chain_mdp": {
+    "env": "chain_mdp",
+    "windows": 150,
+    "lean_final": 11.95,
+    "ref_final": 11.95,
+    "lean_auc": 11.937335333333333,
+    "ref_auc": 11.937335333333333,
+    "max_abs_diff": 0.0,
+    "mean_abs_diff": 0.0,
+    "correlation": 1.0,
+    "identical": true
+  },
+  "squared": {
+    "env": "squared",
+    "windows": 100,
+    "lean_final": 1.0,
+    "ref_final": 1.0,
+    "lean_auc": 0.9825,
+    "ref_auc": 0.9825,
+    "max_abs_diff": 0.0,
+    "mean_abs_diff": 0.0,
+    "correlation": 1.0,
+    "identical": true
+  }
+}

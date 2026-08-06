@@ -1,0 +1,22 @@
+puffer train-ppo [squared] — PPO(clip=0.200000, 4 epochs) + GAE(λ=0.950000), 25→24→6 MLP, 4000 eps
+  ep 200: avg return (last 200) = 0.690000
+  ep 400: avg return (last 200) = 0.990000
+  ep 600: avg return (last 200) = 1.000000
+  ep 800: avg return (last 200) = 1.000000
+  ep 1000: avg return (last 200) = 0.990000
+  ep 1200: avg return (last 200) = 1.000000
+  ep 1400: avg return (last 200) = 1.000000
+  ep 1600: avg return (last 200) = 1.000000
+  ep 1800: avg return (last 200) = 1.000000
+  ep 2000: avg return (last 200) = 1.000000
+  ep 2200: avg return (last 200) = 1.000000
+  ep 2400: avg return (last 200) = 1.000000
+  ep 2600: avg return (last 200) = 1.000000
+  ep 2800: avg return (last 200) = 1.000000
+  ep 3000: avg return (last 200) = 1.000000
+  ep 3200: avg return (last 200) = 1.000000
+  ep 3400: avg return (last 200) = 0.990000
+  ep 3600: avg return (last 200) = 0.990000
+  ep 3800: avg return (last 200) = 1.000000
+  ep 4000: avg return (last 200) = 1.000000
+done.

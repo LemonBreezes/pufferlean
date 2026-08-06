@@ -1,0 +1,214 @@
+<title>pufferlib-lean · trainer throughput vs PufferLib</title>
+<style>
+  :root{
+    --paper:#F6F7F6; --ink:#1B2126; --ink-2:#5A646C; --hair:#D9DEDF;
+    --ours:#137F77; --ours-soft:#137F7722; --ref:#788089; --ref-soft:#78808926;
+    --good:#2E7A4D; --bad:#A85B37; --card:#FFFFFF; --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,monospace;
+    --sans:"Seravek","Avenir Next","Segoe UI",system-ui,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){:root{
+    --paper:#12161A; --ink:#E4E9EB; --ink-2:#8B959D; --hair:#262E34;
+    --ours:#3FBDB2; --ours-soft:#3FBDB222; --ref:#6E7883; --ref-soft:#6E788326;
+    --good:#57B380; --bad:#C97B52; --card:#171C21;
+  }}
+  :root[data-theme="dark"]{
+    --paper:#12161A; --ink:#E4E9EB; --ink-2:#8B959D; --hair:#262E34;
+    --ours:#3FBDB2; --ours-soft:#3FBDB222; --ref:#6E7883; --ref-soft:#6E788326;
+    --good:#57B380; --bad:#C97B52; --card:#171C21;
+  }
+  :root[data-theme="light"]{
+    --paper:#F6F7F6; --ink:#1B2126; --ink-2:#5A646C; --hair:#D9DEDF;
+    --ours:#137F77; --ours-soft:#137F7722; --ref:#788089; --ref-soft:#78808926;
+    --good:#2E7A4D; --bad:#A85B37; --card:#FFFFFF;
+  }
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.55;margin:0;}
+  .wrap{max-width:880px;margin:0 auto;padding:44px 24px 72px;display:flex;flex-direction:column;gap:40px;}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-2);}
+  h1{font-size:29px;font-weight:600;margin:6px 0 2px;text-wrap:balance;}
+  h2{font-size:15px;font-weight:650;margin:0 0 4px;letter-spacing:.01em;}
+  .sub{color:var(--ink-2);font-size:13.5px;margin:0;}
+  section{display:flex;flex-direction:column;gap:14px;}
+  .statband{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+  .stat{background:var(--card);border:1px solid var(--hair);border-radius:6px;padding:16px 18px;}
+  .stat .v{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:27px;font-weight:600;}
+  .stat .v.ours{color:var(--ours);}
+  .stat .k{font-size:12px;color:var(--ink-2);margin-top:2px;}
+  .bars{display:flex;flex-direction:column;gap:10px;background:var(--card);border:1px solid var(--hair);border-radius:6px;padding:18px;}
+  .brow{display:grid;grid-template-columns:190px 1fr 96px;gap:12px;align-items:center;font-size:13px;}
+  .brow .lbl{font-family:var(--mono);font-size:12px;}
+  .track{background:transparent;height:20px;position:relative;}
+  .fill{height:100%;border-radius:3px;background:var(--ours-soft);border-left:3px solid var(--ours);}
+  .fill.ref{background:var(--ref-soft);border-left-color:var(--ref);}
+  .brow .num{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right;font-size:13px;}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;background:var(--card);border:1px solid var(--hair);border-radius:6px;overflow:hidden;}
+  .tblwrap{overflow-x:auto;}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-2);font-weight:500;text-align:right;padding:10px 14px;border-bottom:1px solid var(--hair);}
+  th:first-child,td:first-child{text-align:left;}
+  td{padding:8px 14px;font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right;border-bottom:1px solid var(--hair);}
+  tr:last-child td{border-bottom:none;}
+  td.up{color:var(--good);} td.dn{color:var(--bad);}
+  .arc{display:flex;flex-direction:column;background:var(--card);border:1px solid var(--hair);border-radius:6px;}
+  .step{display:grid;grid-template-columns:78px 1fr 150px 92px;gap:12px;align-items:center;padding:9px 16px;border-bottom:1px solid var(--hair);font-size:13px;}
+  .step:last-child{border-bottom:none;}
+  .step .c{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);}
+  .step .m{min-width:0;}
+  .step .t{height:14px;} .step .t .fill{height:100%;}
+  .step .s{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right;font-size:13px;}
+  .cols2{display:grid;grid-template-columns:1fr 1fr;gap:10px 26px;font-size:13.5px;}
+  .cols2 div{color:var(--ink-2);} .cols2 b{color:var(--ink);font-weight:600;}
+  .note{font-size:12.5px;color:var(--ink-2);}
+  .fine{font-size:12px;color:var(--ink-2);border-top:1px solid var(--hair);padding-top:14px;line-height:1.7;}
+  @media (max-width:640px){ .statband{grid-template-columns:1fr;} .brow{grid-template-columns:120px 1fr 84px;} .step{grid-template-columns:64px 1fr 92px;} .step .t{display:none;} .cols2{grid-template-columns:1fr;} }
+</style>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">pufferlib-lean · benchmark · 2026-08-02 (placement-matched, post native-rollout ladder)</div>
+  <h1>Trainer vs trainer, nothing else</h1>
+  <p class="sub">RTX 5090 (sm_120, shared card, co-tenants idle) · Ryzen 9 9950X · both trainers, identical
+  hyperparameters, envs stepping on CPU on BOTH sides · re-measured after the native-rollout escalation ladder
+  (persistent buffer threads); supersedes the device-env-era report that previously lived at this address</p>
+</header>
+
+<section>
+  <p class="note"><b>What changed:</b> the GPU-resident env capability (device breakout physics) was removed by
+  product decision — it beat PufferLib by moving env stepping onto the GPU, a capability PufferLib deliberately
+  omits, deployed on exactly one env. This page measures what remains: the training loop itself, like for like.
+  Hyperparameter parity is structural (the config files are byte-identical to PufferLib's) plus an explicit
+  horizon pin — earlier comparisons silently ran our horizon default (128) against their tuned 64. Since the
+  first placement-matched report, a native-rollout redesign ladder (persistent buffer worker threads; see
+  <span style="font-family:var(--mono)">docs/native-rollout-design.md</span>) landed a real, bit-identical win —
+  these numbers reflect it.</p>
+</section>
+
+<section>
+  <h2>Head-to-head — PufferLib's native <span style="font-family:var(--mono)">_C</span> trainer, their tuned config per env</h2>
+  <div class="statband">
+    <div class="stat"><div class="v ours">0.98×</div><div class="k">breakout — MinGRU 2L×h64, 4096 envs, horizon 64<br>steady 21.71M · theirs 22.2M<br><b>1.03–1.17× ours</b> including startup</div></div>
+    <div class="stat"><div class="v ours">0.98×</div><div class="k">pong — MinGRU 1L×h32, 1024 envs, horizon 32<br>steady 15.70M · theirs 15.86M<br><b>1.01–1.06× ours</b> including startup</div></div>
+    <div class="stat"><div class="v ours">0.99×</div><div class="k">squared — MinGRU 1L×h128, 4096 envs, horizon 64<br>steady 27.87M · theirs 28.25M<br><b>1.01–1.06× ours</b> including startup</div></div>
+  </div>
+  <div class="bars">
+    <div class="brow"><span class="lbl">breakout · theirs</span><div class="track"><div class="fill ref" style="width:78.6%"></div></div><span class="num">22.2M</span></div>
+    <div class="brow"><span class="lbl">breakout · ours</span><div class="track"><div class="fill" style="width:76.8%"></div></div><span class="num">21.71M</span></div>
+    <div class="brow"><span class="lbl">pong · theirs</span><div class="track"><div class="fill ref" style="width:56.1%"></div></div><span class="num">15.86M</span></div>
+    <div class="brow"><span class="lbl">pong · ours</span><div class="track"><div class="fill" style="width:55.6%"></div></div><span class="num">15.70M</span></div>
+    <div class="brow"><span class="lbl">squared · theirs</span><div class="track"><div class="fill ref" style="width:100%"></div></div><span class="num">28.25M</span></div>
+    <div class="brow"><span class="lbl">squared · ours</span><div class="track"><div class="fill" style="width:98.7%"></div></div><span class="num">27.87M</span></div>
+  </div>
+  <p class="note">Steady-state SPS, both sides on the same box in one interleaved session (2 reps/side).
+  Their side: the compiled <span style="font-family:var(--mono)">pufferlib._C</span> native trainer driven through their own
+  <span style="font-family:var(--mono)">load_config</span>, rebuilt per env. Bars share one scale.
+  MinGRU samples in f32 (f64 tier via PUFFER_MG_SAMPF32=0) and runs its forward GEMMs in bf16 storage with f32
+  accumulation — PufferLib's own forward precision — by default (<span style="font-family:var(--mono)">PUFFER_MG_WPREC=f32</span>
+  opts back into the bit-exact f32/tf32 tier, verified byte-identical); multi-seed learning curves verified equivalent on both tiers.</p>
+</section>
+
+<section>
+  <h2>Correctness: 22/22 parity, and what "bytewise" can mean</h2>
+  <p>Two independently written implementations cannot produce byte-identical <em>training runs</em> —
+  PufferLib draws from per-agent curand Philox streams and we use splitmix64, the tensor-core tilings differ,
+  and bf16 rounding order differs. So parity is asserted where it is mathematically definable, through a
+  transitive chain: our Lean f64 oracle is checked against the <b>real</b> PufferLib library, and every C and
+  CUDA kernel we actually run is checked against that oracle.</p>
+  <div class="tblwrap"><table>
+    <tr><th>layer</th><th>checked against</th><th>result</th></tr>
+    <tr><td>V-Trace advantage</td><td>compiled <span style="font-family:var(--mono)">_C.puff_advantage</span> (bf16 CUDA)</td><td class="up"><b>bit-exact, 768/768</b></td></tr>
+    <tr><td>Muon optimizer step</td><td>real <span style="font-family:var(--mono)">pufferlib.muon.Muon.step()</span></td><td>4.4e−16 (f64 roundoff)</td></tr>
+    <tr><td>MinGRU forward_eval / forward_train</td><td>real <span style="font-family:var(--mono)">pufferlib.models</span> (Heinsen scan)</td><td>1.1e−16 / 2.2e−16</td></tr>
+    <tr><td>All FFI kernels (MLP, CNN, Gaussian, LSTM, MinGRU BPTT)</td><td>Lean AD oracle</td><td class="up"><b>exact, Δ = 0</b></td></tr>
+    <tr><td>GPU f64 paths (V-Trace, Muon, adv-norm, sampler)</td><td>Lean f64 oracle</td><td class="up"><b>bit-exact, Δ = 0</b></td></tr>
+    <tr><td>GPU reduced-precision paths (tf32 / bf16)</td><td>Lean f64 oracle</td><td>within tier tolerance</td></tr>
+    <tr><td>Action spaces, all 39 built envs</td><td>their <span style="font-family:var(--mono)">ACT_SIZES</span></td><td class="up"><b>identical</b></td></tr>
+  </table></div>
+  <p class="note">All 39 built ocean environments were run through training; 29 show a clear learning
+  signal and the rest are explained (sparse-reward at this budget, or zero-sum by construction). The sweep
+  found three real defects, since fixed: a policy init that ignored fan-in and saturated the softmax at
+  hidden 512 (maze went from a permanent flat zero to solving 79% of episodes), an adapter that never set
+  double_pendulum's link geometry (every reward collapsed to exactly 0 through <span style="font-family:var(--mono)">fmaxf(NaN,0)</span>),
+  and a missing map bank that left tower_climb with an unreachable goal. One divergence from PufferLib is
+  deliberate and measured: our Gaussian logstd is state-dependent where theirs is a state-independent
+  parameter — we built theirs and it trained worse on our stack, and on their own continuous env
+  (squared_continuous) PufferLib reaches −0.76 at 6M steps and +0.29 at 200M, where we reach +0.66…+0.81 at 6M.</p>
+</section>
+
+<section>
+  <h2>SPS conventions — and the full like-for-like table</h2>
+  <p>Source forensics established that the two stacks' <em>reported</em> numbers measure different things.
+  <b>Their SPS</b> (<span style="font-family:var(--mono)">puf_log</span>) is a windowed, post-warmup instantaneous rate:
+  <span style="font-family:var(--mono)">create_pufferl</span> runs 11 eager epochs plus every CUDA-graph capture
+  <em>before their clock starts</em> (0.18–0.45s, untimed), then resets all counters.
+  <b>Our number</b> is total steps over total wall, including our own startup (0.02–0.20s).
+  So all three conventions were measured on both stacks:</p>
+  <div class="tblwrap"><table>
+    <tr><th>env</th><th>convention</th><th>theirs</th><th>ours</th><th>ratio</th></tr>
+    <tr><td rowspan="3">squared</td><td>everything included, 20M steps</td><td>20.47M</td><td class="up">21.71M</td><td class="up"><b>1.06× ours</b></td></tr>
+    <tr><td>everything included, 100M steps</td><td>26.15M</td><td class="up">26.38M</td><td class="up"><b>0.99× ours</b></td></tr>
+    <tr><td>steady-state</td><td>28.25M</td><td>27.87M</td><td>0.99×</td></tr>
+    <tr><td rowspan="3">breakout</td><td>everything included, 40M steps</td><td>17.85M</td><td class="up">20.88M</td><td class="up"><b>1.17× ours</b></td></tr>
+    <tr><td>everything included, 160M steps</td><td>20.90M</td><td class="up">21.50M</td><td class="up"><b>1.03× ours</b></td></tr>
+    <tr><td>steady-state</td><td>22.17M</td><td>21.71M</td><td>0.98×</td></tr>
+    <tr><td rowspan="3">pong</td><td>everything included, 40M steps</td><td>14.65M</td><td class="up">15.59M</td><td class="up"><b>1.06× ours</b></td></tr>
+    <tr><td>everything included, 160M steps</td><td>15.54M</td><td class="up">15.67M</td><td class="up"><b>1.01× ours</b></td></tr>
+    <tr><td>steady-state</td><td>15.86M</td><td>15.70M</td><td>0.99×</td></tr>
+  </table></div>
+  <p class="note">Steady-state for our side is a two-point fit over run lengths (squared's 20/100M and 100/200M pairs
+  agree to 0.5%: 27.87M and 27.74M, startup 0.185–0.203s); theirs is their own windowed metric, cross-checked by the
+  same fit. <b>Every convention that counts all the work lands in our favour</b>, and steady-state is a 1–2% deficit —
+  inside the run-to-run band both stacks showed tonight (their squared varied 28.06–28.99M across runs).
+  Forensics also established: <span style="font-family:var(--mono)">backend&nbsp;=&nbsp;Serial</span> in their squared.ini is a dead knob
+  (parsed, never consumed); nothing in their rollout is env-conditional beyond the obs dtype; their per-step
+  rollout GPU work (24µs per 2048-row graph) is matched by ours; and their train phase is measurably <em>slower</em>
+  than ours (single-threaded <span style="font-family:var(--mono)">build_cdf</span>,
+  <span style="font-family:var(--mono)">index_copy</span> at 10% of their GPU time).</p>
+</section>
+
+<section>
+  <h2>The gap-closing campaign (one evening, post-removal)</h2>
+  <div class="tblwrap"><table>
+    <tr><th>env</th><th>start</th><th>end</th><th>abs SPS</th><th>what moved it</th></tr>
+    <tr><td>pong</td><td>0.77×</td><td class="up">0.99×</td><td class="up">12.6M → 15.7M steady — parity</td><td style="text-align:left">f32 sampler tier (the fused kernel's sampler ran in f64, 1/64 ALU rate on GB202) + resident chaining (obs/state live natively across updates; the ~270MB-per-update return and f64 round trips retired — bit-identical, Lean still sequences every phase)</td></tr>
+    <tr><td>squared</td><td>0.41×</td><td class="up">0.99×</td><td class="up">10.9M → 27.9M steady (+156%)</td><td style="text-align:left">big-H WMMA + persistent buffer threads + f32 sampler tier + u8 any-D obs wire + resident chaining (+13%) + bf16 forward tier through the big-H encoder (default ON, their own precision) + forensic rehabilitation of the wide-bf16 arm (device-side terminals fixed a gate kernel reading pinned host over PCIe, head bias folded into the sampler, setup-time graph pre-capture, zero-copy pinned actions, in-graph obs H2D, async rng) — per-step GPU, worker cycle, and train+tail all match PufferLib's measured numbers. Final push: a tier-gated FMA pass (this TU compiles --fmad=false to anchor f32 bit-exactness, which was silently halving throughput in every hand-written scalar chain), a 6-node wide graph, and a buffer sweep that put the wide arm on the same adaptive 16-buffer rule as the fused one. Steady-state 0.99×; every startup-inclusive convention favours us</td></tr>
+    <tr><td>breakout</td><td>0.77×</td><td class="up">0.98×</td><td class="up">17.1M → 21.7M steady — parity</td><td style="text-align:left">persistent buffer threads + f32 sampler tier + resident chaining (+16%); wide-GEMM/occupancy/fast-transcendental/full-bf16-replication all refuted by direct measurement along the way — the boundary tax, not the kernels, was the residual</td></tr>
+  </table></div>
+</section>
+
+<section>
+  <h2>Refuted on the way (built, measured, reverted)</h2>
+  <div class="cols2">
+    <div><b>Global-scratch fused Muon</b> for medium/large models — squared −87%: one block serially grinding real GEMMs from global memory obliterates any enqueue saving. Launch fusion only pays when per-launch GPU work is trivial.</div>
+    <div><b>Single-GPU-thread launcher</b> — disproven before building: buffer-count sweeps are flat, so the per-step sync cost is completion wait, not driver-mutex contention.</div>
+    <div><b>Rollout CUDA-graph replay</b> — byte-identical, −0.7%: after the minibatch de-sync the host already runs ahead of the GPU; collapsing ~3072 launches had nothing left to win.</div>
+    <div><b>FR=32 WMMA tiling</b> — −13%: the fused forward is scalar-stage-bound, not weight-load-bound, closing the whole prefetch/tiling family.</div>
+    <div><b>Spin-flag completion</b> — re-refuted at small scale (−3%), and <b>buffer-count / block-size sweeps</b> — flat everywhere.</div>
+    <div><b>Env fan-out decoupled from forward width (M1)</b> — flat-to-negative on all three envs at every ratio tested: the fused kernel does constant per-row work regardless of launch width.</div>
+    <div><b>Wide-GEMM forward arm (M6)</b> — refuted <em>before</em> writing its budgeted ~350 LoC: the existing GEMM lineage, measured directly at width via an existing gate, loses to our own fused kernel by ~1.8× at h≤64, and going wider makes it <em>worse</em> (squared 16.7M→11.1M at true whole-batch width — losing buffer-level overlap costs more than any GEMM efficiency gained).</div>
+    <div><b>CPU training mode</b> — a finding, not a refutation: NEITHER library has one. Ours is CUDA-only by design; their shipped trainer is the CUDA _C (their --cpu build lacks the trainer entry points).</div>
+  </div>
+</section>
+
+<section>
+  <h2>Where the remaining gap lives</h2>
+  <div class="cols2">
+    <div><b>h ≤ 64 shapes (~0.77–0.78×)</b> — diffuse per-step loop efficiency: their lean native C loop (one captured CUDA graph + one sync per step) vs our worker/sync/launch structure. A full escalation-ladder investigation (<span style="font-family:var(--mono)">docs/native-rollout-design.md</span>) found and landed the one real, low-risk win (persistent buffer threads); the rest of the gap resisted every incremental lever tried.</div>
+    <div><b>h128 shapes (0.61×)</b> — their fused bf16 whole-net kernels still lead on GEMM-heavy widths; our tf32 WMMA fused forward narrows but does not match. Closing this further needs a genuinely new batched-across-buffers forward architecture (one big GEMM per stage, batched across all agents, launch-collapsed via captured graphs) — the same risk/scope class as a rejected all-native-driver design; flagged, not started.</div>
+    <div><b>What we keep</b> — every path verified against the Lean f64 oracle: byte-identical trajectories wherever a change claims bit-identity, determinism + curve-tracking wherever a precision tier moves. The whole native-rollout ladder (5 rungs investigated) shipped without a single tolerance-class change.</div>
+  </div>
+</section>
+
+<section>
+  <p class="fine"><b>Method.</b> Sequential runs only (parallel GPU benches corrupt each other); co-resident Ollama/ComfyUI
+  idle throughout; 40M env-steps per run. Hyperparameters: PufferLib's own tuned per-env configs (files byte-identical in
+  both repos), horizon pinned to their effective value per env. Their numbers via a minimal probe driving
+  <span style="font-family:var(--mono)">pufferlib._C.create_pufferl/rollouts/train</span> with their
+  <span style="font-family:var(--mono)">load_config</span>; per-env _C rebuilds (needs a stub
+  <span style="font-family:var(--mono)">cuda_profiler_api.h</span>, gcc-15, and a libomp5→libomp shim on this box);
+  their original breakout build restored after. Learning verified on both sides every run (their pong solves at ep-return 21;
+  ours saturates its normalized 1.0; squared curves track within the tf32 tolerance tier).
+  <b>Lineage.</b> Ours at commit <span style="font-family:var(--mono)">3ac5f9b</span> (post native-rollout ladder); the device-env-era numbers this page
+  replaces (flagship 14.77M, later 25.7M at horizon 128 with GPU envs) remain in git history
+  (<span style="font-family:var(--mono)">docs/benchmark.html</span> prior revisions) — valid measurements of a capability
+  that no longer ships.</p>
+</section>
+
+</div>

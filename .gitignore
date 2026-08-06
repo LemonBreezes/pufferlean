@@ -1,0 +1,25 @@
+# Lean / Lake build artifacts
+/.lake/
+*.olean
+*.ilean
+
+# Compiled C differential-test binaries
+/ctest/bin/
+
+# Policy checkpoints written by `puffer train` (STREAM 3): checkpoints/<env>/<seed>/<step>.bin
+/checkpoints/
+
+# Editor / OS
+*.swp
+.DS_Store
+__pycache__/
+*.pyc
+tools/.mypy_cache/
+# built env plugins + vendored raylib binaries (rebuild via ocean/build.sh)
+ocean/**/libenv_*.so
+ocean/_raylib
+envs/**/libenv_*.so
+
+# boxoban's puzzle bank: ~120MB (basic, generated) / ~180MB (medium, downloaded) of CACHE that
+# ocean/boxoban/adapter.c regenerates on first use, exactly as PufferLib's binding does.
+resources/boxoban/

@@ -1,0 +1,50 @@
+#+title: Pufferlib Lean
+
+This is a Lean 4 port of Pufferlib 4.0.0. Currently, the default network, MinGRU
+matches Pufferlib's performance. The other networks need performance testing.
+This port is CUDA only. The purpose of this port is for experimenting with
+machine learning mathematics. I coded this with Claude Code so your first
+reference for any questions is to open an AI assistant.
+
+* Requirements
+  - *elan* (Lean toolchain manager) — installs the pinned Lean/Lake automatically:
+    ~curl https://elan.lean-lang.org/elan-init.sh -sSf | sh~
+  - *An NVIDIA GPU + CUDA toolkit* (developed on CUDA 13). This port is CUDA-only;
+    there is no CPU trainer.
+  - *A host C/C++ compiler nvcc accepts.* CUDA 13 rejects gcc > 15, so use gcc-15
+    or clang.
+  - *OpenBLAS* with development headers (~openblas~ / ~libopenblas-dev~).
+  - *clang* — only for the optional ~drone~ env (it uses clang vector builtins);
+    every other env builds with gcc, and ~ocean/build.sh~ skips ~drone~ if clang is absent.
+  - ~curl~ (to fetch the bundled raylib on first build) and, for the verification
+    sweep ~tools/env_sweep.sh~, ~gawk~ and ~bc~.
+
+* Building
+  #+begin_src sh
+  lake build puffer     # the EXE target — plain `lake build` builds only the lib, exe goes stale
+  ./ocean/build.sh      # build every env plugin (or `./ocean/build.sh breakout` for one)
+  .lake/build/bin/puffer train breakout
+  #+end_src
+  raylib 5.5 is downloaded into ~ocean/_raylib~ on the first ~ocean/build.sh~
+  (x86_64 Linux / macOS); on other platforms build raylib 5.5 yourself and set
+  ~RAYLIB_HOME~.
+
+** Building on a different machine
+  The build defaults target THIS dev box (CUDA at ~/opt/cuda~, gcc-15, OpenBLAS at
+  ~/usr/lib64~, an RTX 5090 = ~sm_120~). Override via environment variables before
+  ~lake build puffer~ — a wrong ~PUFFER_CUDA_ARCH~ still *builds* but the GPU
+  trainer won't launch on your card:
+  #+begin_src sh
+  CUDA_HOME=/usr/local/cuda          # CUDA prefix (nvcc, include, lib64); or CUDA_PATH / CUDACXX
+  PUFFER_CUDA_ARCH=sm_89             # YOUR GPU: sm_86 (30xx), sm_89 (40xx), sm_90 (Hopper), or `native`
+  PUFFER_NVCC_CCBIN=gcc-14           # host compiler for nvcc (≤ gcc-15); set empty to use plain `gcc`
+  OPENBLAS_INC=/usr/include          # OpenBLAS headers dir
+  OPENBLAS_LIB=/usr/lib/x86_64-linux-gnu/libopenblas.so   # OpenBLAS .so (linked by absolute path)
+  #+end_src
+  These are read when the lakefile elaborates, so after changing one on an
+  already-configured tree, reconfigure with ~lake build puffer -R~.
+
+* License
+  MIT — see [[file:LICENSE][LICENSE]]. This project is a port of
+  [[https://github.com/PufferAI/PufferLib][PufferLib]] (also MIT, © 2022 PufferAI);
+  the Ocean environments under ~ocean/~ are derived from it and carry its notice.

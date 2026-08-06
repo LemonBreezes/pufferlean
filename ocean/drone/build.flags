@@ -1,0 +1,3 @@
+# drone/physics.h uses clang vector builtins (__builtin_elementwise_*, vector_size vf) → needs clang + AVX.
+ENVCC=clang
+EXTRA="-march=native"

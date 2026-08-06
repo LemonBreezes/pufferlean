@@ -1,0 +1,17 @@
+puffer train-ppo [chain_mdp] — PPO(clip=0.200000, 4 epochs) + GAE(λ=0.950000), 5→16→3 MLP, 3000 eps
+  ep 200: avg return (last 200) = 11.295030
+  ep 400: avg return (last 200) = 11.955000
+  ep 600: avg return (last 200) = 11.985000
+  ep 800: avg return (last 200) = 11.990000
+  ep 1000: avg return (last 200) = 11.970000
+  ep 1200: avg return (last 200) = 11.985000
+  ep 1400: avg return (last 200) = 11.960000
+  ep 1600: avg return (last 200) = 11.990000
+  ep 1800: avg return (last 200) = 11.995000
+  ep 2000: avg return (last 200) = 11.990000
+  ep 2200: avg return (last 200) = 11.985000
+  ep 2400: avg return (last 200) = 11.990000
+  ep 2600: avg return (last 200) = 11.995000
+  ep 2800: avg return (last 200) = 11.985000
+  ep 3000: avg return (last 200) = 11.990000
+done.
